@@ -1,0 +1,6 @@
+# Formatação canônica: só opções estáveis, para `cargo fmt --check` dar o
+# mesmo resultado em qualquer toolchain stable.
+edition = "2021"
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
