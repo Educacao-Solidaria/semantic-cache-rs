@@ -4,8 +4,12 @@
 //! propriedades de normalização e contratos de erro do motor semântico.
 
 use semantic_cache_rs::domain::{Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
-use semantic_cache_rs::math::{is_orthogonal, normalize_slice_in_place, CosineDistance, NormalizedVector};
-use semantic_cache_rs::metric::{CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator};
+use semantic_cache_rs::math::{
+    is_orthogonal, normalize_slice_in_place, CosineDistance, NormalizedVector,
+};
+use semantic_cache_rs::metric::{
+    CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator,
+};
 
 #[test]
 fn test_contract_unit_vector_cosine_and_dot_product_equivalence() {
@@ -45,11 +49,17 @@ fn test_contract_euclidean_distance_axioms() {
 
     // 2. Não-negatividade: d(x, y) >= 0
     let d_ab = metric.distance(&v_a, &v_b).unwrap();
-    assert!(d_ab > 0.0, "d(a, b) deve ser estritamente positiva para a != b");
+    assert!(
+        d_ab > 0.0,
+        "d(a, b) deve ser estritamente positiva para a != b"
+    );
 
     // 3. Simetria: d(a, b) == d(b, a)
     let d_ba = metric.distance(&v_b, &v_a).unwrap();
-    assert!((d_ab - d_ba).abs() < 1e-6, "Simetria violada: d(a, b) != d(b, a)");
+    assert!(
+        (d_ab - d_ba).abs() < 1e-6,
+        "Simetria violada: d(a, b) != d(b, a)"
+    );
 
     // 4. Desigualdade triangular: d(a, b) <= d(a, c) + d(c, b)
     let d_ac = metric.distance(&v_a, &v_c).unwrap();
@@ -89,10 +99,16 @@ fn test_contract_orthogonality_invariants() {
     assert!(is_orthogonal(&v_y, &v_z, 1e-6).unwrap());
 
     let sim_xy = CosineSimilarity.similarity(&v_x, &v_y).unwrap();
-    assert!(sim_xy.abs() < 1e-6, "Vetores ortogonais devem ter cosseno zero");
+    assert!(
+        sim_xy.abs() < 1e-6,
+        "Vetores ortogonais devem ter cosseno zero"
+    );
 
     let dist_xy = CosineDistance.distance(&v_x, &v_y).unwrap();
-    assert!((dist_xy - 1.0).abs() < 1e-6, "Vetores ortogonais devem ter distancia cosseno 1.0");
+    assert!(
+        (dist_xy - 1.0).abs() < 1e-6,
+        "Vetores ortogonais devem ter distancia cosseno 1.0"
+    );
 }
 
 #[test]
@@ -133,7 +149,10 @@ fn test_contract_batch_invariants() {
     assert!(batch.normalize_all().is_ok());
 
     for v in &batch.vectors {
-        assert!((v.norm() - 1.0).abs() < 1e-6, "Vetor no batch deve ter norma unitaria");
+        assert!(
+            (v.norm() - 1.0).abs() < 1e-6,
+            "Vetor no batch deve ter norma unitaria"
+        );
     }
 
     let meta = Metadata::new("tenant-contrato", "deepseek-v3");

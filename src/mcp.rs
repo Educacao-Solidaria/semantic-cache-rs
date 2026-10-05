@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::domain::{SimilarityThreshold, Vector};
+use serde::{Deserialize, Serialize};
 
 /// Requisição para a ferramenta MCP `semantic_cache_lookup`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
