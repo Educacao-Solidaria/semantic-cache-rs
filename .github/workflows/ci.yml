@@ -17,6 +17,7 @@ env:
     Cargo.toml
     crates/semantic-cache-server/Cargo.toml
     crates/semantic-cache-testkit/Cargo.toml
+    crates/semantic-cache-simd/Cargo.toml
 
 jobs:
   fmt:
@@ -50,6 +51,7 @@ jobs:
             . -> target
             crates/semantic-cache-server -> target
             crates/semantic-cache-testkit -> target
+            crates/semantic-cache-simd -> target
       - name: cargo clippy -D warnings
         run: |
           for m in $MANIFESTS; do
@@ -70,6 +72,7 @@ jobs:
             . -> target
             crates/semantic-cache-server -> target
             crates/semantic-cache-testkit -> target
+            crates/semantic-cache-simd -> target
       - name: cargo test
         run: |
           for m in $MANIFESTS; do
@@ -94,6 +97,24 @@ jobs:
       # não dá número confiável. A medição é local ou em runner dedicado.
       - name: cargo bench --no-run
         run: cargo bench --no-run --locked
+
+  simd:
+    name: simd (aarch64 + avx512)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/semantic-cache-simd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-unknown-linux-gnu
+      # O runner é x86-64: o ramo NEON da detecção só é compilado aqui.
+      - name: clippy aarch64
+        run: cargo clippy --all-targets --locked --target aarch64-unknown-linux-gnu -- -D warnings
+      - name: cargo test --features avx512
+        run: cargo test --all-targets --locked --features avx512
 
   release:
     name: build release (LTO)
