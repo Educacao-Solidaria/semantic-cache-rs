@@ -6,5 +6,5 @@
 pub mod domain;
 pub mod mcp;
 
-pub use domain::{CacheEntry, SimilarityThreshold, Vector, VectorError};
+pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
 pub use mcp::{LookupRequest, LookupResponse, SemanticCacheEngine, StoreRequest, StoreResponse};

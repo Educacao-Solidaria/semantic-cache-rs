@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+pub mod metadata;
+pub mod batch;
+
+pub use metadata::Metadata;
+pub use batch::VectorBatch;
+
 /// Erro de validação ou cálculo do domínio vetorial.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VectorError {
