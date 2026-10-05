@@ -76,9 +76,21 @@ pub fn stats() -> Option<AllocStats> {
 #[cfg(all(test, not(target_env = "msvc")))]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// As estatísticas do jemalloc são uma fotografia global, trocada a cada
+    /// `epoch::advance`. Se outro teste avança a epoch entre duas leituras de
+    /// `stats()`, os campos vêm de fotografias diferentes e as invariantes
+    /// falham à toa. Todo teste que chama `stats()` segura esta trava.
+    static STATS: Mutex<()> = Mutex::new(());
+
+    fn stats_lock() -> MutexGuard<'static, ()> {
+        STATS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     #[test]
     fn jemalloc_is_the_global_allocator() {
+        let _guard = stats_lock();
         assert_eq!(ALLOCATOR, "jemalloc");
         // Só há estatísticas se o jemalloc estiver de fato servindo o heap.
         assert!(stats().is_some_and(|s| s.allocated > 0));
@@ -86,6 +98,7 @@ mod tests {
 
     #[test]
     fn stats_respect_jemalloc_invariants() {
+        let _guard = stats_lock();
         let s = stats().expect("stats do jemalloc");
         assert!(s.allocated <= s.active);
         assert!(s.active <= s.resident);
@@ -96,6 +109,7 @@ mod tests {
     #[test]
     fn allocated_grows_with_a_large_allocation() {
         const SIZE: usize = 64 * 1024 * 1024;
+        let _guard = stats_lock();
         let before = stats().expect("stats").allocated;
         let buf = vec![1u8; SIZE];
         let during = stats().expect("stats").allocated;
