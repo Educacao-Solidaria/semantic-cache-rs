@@ -13,7 +13,10 @@ env:
   CARGO_TERM_COLOR: always
   # Crates checados pelo CI. Manifest ausente é pulado, então o crate de
   # domínio da raiz entra sozinho quando o Cargo.toml dele chegar à main.
-  MANIFESTS: Cargo.toml crates/semantic-cache-server/Cargo.toml
+  MANIFESTS: >-
+    Cargo.toml
+    crates/semantic-cache-server/Cargo.toml
+    crates/semantic-cache-testkit/Cargo.toml
 
 jobs:
   fmt:
@@ -24,11 +27,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      # Sem `--all`: ele formataria também as dependências por path (o testkit
+      # aponta para o crate da raiz), e cada crate seria checado duas vezes.
       - name: cargo fmt --check
         run: |
           for m in $MANIFESTS; do
             [ -f "$m" ] || continue
-            cargo fmt --manifest-path "$m" --all -- --check
+            cargo fmt --manifest-path "$m" -- --check
           done
 
   clippy:
@@ -44,6 +49,7 @@ jobs:
           workspaces: |
             . -> target
             crates/semantic-cache-server -> target
+            crates/semantic-cache-testkit -> target
       - name: cargo clippy -D warnings
         run: |
           for m in $MANIFESTS; do
@@ -63,6 +69,7 @@ jobs:
           workspaces: |
             . -> target
             crates/semantic-cache-server -> target
+            crates/semantic-cache-testkit -> target
       - name: cargo test
         run: |
           for m in $MANIFESTS; do
@@ -70,6 +77,23 @@ jobs:
             lock=""; [ -f "$(dirname "$m")/Cargo.lock" ] && lock="--locked"
             cargo test --manifest-path "$m" --all-targets $lock
           done
+
+  bench:
+    name: benches compilam
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/semantic-cache-testkit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/semantic-cache-testkit -> target
+      # Compila no profile `bench` (otimizado), sem medir: runner compartilhado
+      # não dá número confiável. A medição é local ou em runner dedicado.
+      - name: cargo bench --no-run
+        run: cargo bench --no-run --locked
 
   release:
     name: build release (LTO)
