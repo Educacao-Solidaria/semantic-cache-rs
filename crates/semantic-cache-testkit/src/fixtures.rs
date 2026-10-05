@@ -146,14 +146,14 @@ mod tests {
         assert_eq!(batch.dimension, 1536);
         for v in &batch.vectors {
             assert_eq!(v.dim(), 1536);
-            assert!((v.norm() - 1.0).abs() < TOL, "norma {}", v.norm());
+            crate::assert_f32_near!(v.norm(), 1.0, abs = TOL);
         }
     }
 
     #[test]
     fn dimension_one_is_plus_or_minus_one() {
         let v = VectorGen::new(1).unit(1);
-        assert!((v.data[0].abs() - 1.0).abs() < TOL);
+        crate::assert_f32_near!(v.data[0].abs(), 1.0, abs = TOL);
     }
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
         let batch = VectorGen::new(9).batch(20, 768);
         for (i, a) in batch.vectors.iter().enumerate() {
             for b in &batch.vectors[i + 1..] {
-                assert!(a.cosine_similarity(b).unwrap().abs() < 0.25);
+                crate::assert_f32_near!(a.cosine_similarity(b).unwrap(), 0.0, abs = 0.25);
             }
         }
     }
@@ -174,9 +174,9 @@ mod tests {
         let base = g.unit(384);
         for target in [0.999, 0.92, 0.5, 0.0, -0.7, 1.0, -1.0] {
             let v = g.with_cosine(&base, target);
-            assert!((v.norm() - 1.0).abs() < TOL);
+            crate::assert_f32_near!(v.norm(), 1.0, abs = TOL);
             let got = v.cosine_similarity(&base).unwrap();
-            assert!((got - target).abs() < 1e-4, "alvo {target}, obtido {got}");
+            crate::assert_f32_near!(got, target, abs = 1e-4);
         }
     }
 

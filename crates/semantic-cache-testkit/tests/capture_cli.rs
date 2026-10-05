@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+use semantic_cache_testkit::assert_vec_near;
 use semantic_cache_testkit::datasets::{synthetic_placeholder, EmbeddingFixture};
 
 const TEXTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/embeddings/texts.tsv");
@@ -66,10 +67,6 @@ fn versioned_placeholder_is_reproducible() {
     // Tolerância e não igualdade de bits: `ln`/`cos` da libm variam entre plataformas.
     for (a, b) in regenerated.entries.iter().zip(&versioned.entries) {
         assert_eq!((&a.id, &a.text), (&b.id, &b.text));
-        assert!(a
-            .embedding
-            .iter()
-            .zip(&b.embedding)
-            .all(|(x, y)| (x - y).abs() < 1e-6));
+        assert_vec_near!(a.embedding, b.embedding, abs = 1e-6);
     }
 }
