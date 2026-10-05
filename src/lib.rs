@@ -10,6 +10,7 @@ pub mod math;
 pub mod mcp;
 pub mod metric;
 pub mod storage;
+pub mod threshold;
 
 pub use codec::{
     deserialize_entry, deserialize_vector, serialize_entry, serialize_vector, BinaryCodec,
@@ -21,6 +22,7 @@ pub use metric::{
     CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator,
 };
 pub use storage::{CacheStore, InMemoryStore};
+pub use threshold::{MatchLevel, SimilarityThresholdConfig};
 
 pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
 pub use mcp::{LookupRequest, LookupResponse, SemanticCacheEngine, StoreRequest, StoreResponse};
