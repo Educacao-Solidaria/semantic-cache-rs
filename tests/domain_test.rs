@@ -63,7 +63,8 @@ fn test_mcp_json_serialization() {
     };
 
     let json_str = serde_json::to_string(&req).expect("erro ao serializar json");
-    let deserialized: LookupRequest = serde_json::from_str(&json_str).expect("erro ao desserializar");
+    let deserialized: LookupRequest =
+        serde_json::from_str(&json_str).expect("erro ao desserializar");
 
     assert_eq!(req.prompt, deserialized.prompt);
     assert_eq!(deserialized.threshold, Some(0.90));
