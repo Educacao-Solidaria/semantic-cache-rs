@@ -5,10 +5,12 @@
 
 pub mod domain;
 pub mod error;
+pub mod math;
 pub mod mcp;
 pub mod metric;
 
 pub use error::{CacheError, CacheResult};
+pub use math::{CosineDistance, NormalizedVector};
 pub use metric::{CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator};
 
 pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
