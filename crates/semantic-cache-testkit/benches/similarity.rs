@@ -9,25 +9,15 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use semantic_cache_rs::math::{dot_product, euclidean_distance};
-use semantic_cache_rs::{CosineDistance, DistanceMetric, NormalizedVector, Vector};
+use semantic_cache_rs::{CosineDistance, DistanceMetric, NormalizedVector};
 use semantic_cache_testkit::bench::{Precision, EMBEDDING_DIMS};
-
-/// Vetor determinístico de norma não nula; `phase` distingue `a` de `b`.
-fn wave(dim: usize, phase: f32) -> Vector {
-    let mut x = phase;
-    let data = (0..dim)
-        .map(|_| {
-            x += 0.618;
-            x.sin()
-        })
-        .collect();
-    Vector::new(data).expect("dim > 0")
-}
+use semantic_cache_testkit::fixtures::VectorGen;
 
 fn similarity(c: &mut Criterion) {
     let mut group = c.benchmark_group("similarity");
+    let mut vectors = VectorGen::new(0x5EED);
     for dim in EMBEDDING_DIMS {
-        let (a, b) = (wave(dim, 0.0), wave(dim, 1.0));
+        let (a, b) = (vectors.unit(dim), vectors.unit(dim));
         let na = NormalizedVector::new(a.clone()).expect("norma não nula");
         let nb = NormalizedVector::new(b.clone()).expect("norma não nula");
         // Elementos/s: compara dimensões diferentes na mesma escala.

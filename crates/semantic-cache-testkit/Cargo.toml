@@ -23,9 +23,8 @@ publish = false
 # Sem `plotters`/HTML: o relatório estatístico (média, IC 95%, outliers e
 # detecção de regressão) sai no terminal e em `target/criterion/**/*.json`.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-
-[dev-dependencies]
-# Crate de domínio da raiz: alvo dos benchmarks de similaridade.
+# Crate de domínio da raiz: as fixtures devolvem os tipos dele (`Vector`,
+# `VectorBatch`) e os benchmarks medem as métricas dele.
 semantic-cache-rs = { path = "../.." }
 
 [[bench]]
