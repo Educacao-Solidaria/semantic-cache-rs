@@ -12,7 +12,9 @@ pub mod threshold;
 
 pub use error::{CacheError, CacheResult};
 pub use math::{CosineDistance, NormalizedVector};
-pub use metric::{CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator};
+pub use metric::{
+    CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator,
+};
 pub use threshold::{MatchLevel, SimilarityThresholdConfig};
 
 pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
