@@ -1,0 +1,22 @@
+[package]
+name = "semantic-cache-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
+description = "Binário do servidor MCP do semantic-cache-rs"
+publish = false
+
+# Raiz de workspace própria: isola este crate do Cargo.toml da raiz do
+# repositório (crate de domínio) até a unificação dos manifests.
+[workspace]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

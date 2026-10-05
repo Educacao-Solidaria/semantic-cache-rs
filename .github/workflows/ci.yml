@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Crates checados pelo CI. Manifest ausente é pulado, então o crate de
+  # domínio da raiz entra sozinho quando o Cargo.toml dele chegar à main.
+  MANIFESTS: Cargo.toml crates/semantic-cache-server/Cargo.toml
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: |
+          for m in $MANIFESTS; do
+            [ -f "$m" ] || continue
+            cargo fmt --manifest-path "$m" --all -- --check
+          done
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/semantic-cache-server -> target
+      - name: cargo clippy -D warnings
+        run: |
+          for m in $MANIFESTS; do
+            [ -f "$m" ] || continue
+            lock=""; [ -f "$(dirname "$m")/Cargo.lock" ] && lock="--locked"
+            cargo clippy --manifest-path "$m" --all-targets $lock -- -D warnings
+          done
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            crates/semantic-cache-server -> target
+      - name: cargo test
+        run: |
+          for m in $MANIFESTS; do
+            [ -f "$m" ] || continue
+            lock=""; [ -f "$(dirname "$m")/Cargo.lock" ] && lock="--locked"
+            cargo test --manifest-path "$m" --all-targets $lock
+          done
