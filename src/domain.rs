@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-pub mod metadata;
 pub mod batch;
+pub mod metadata;
 
-pub use metadata::Metadata;
 pub use batch::VectorBatch;
+pub use metadata::Metadata;
 
 /// Erro de validação ou cálculo do domínio vetorial.
 #[derive(Debug, PartialEq, Eq)]
@@ -18,7 +18,10 @@ impl std::fmt::Display for VectorError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DimensionMismatch { expected, actual } => {
-                write!(f, "dimensao incompativel: esperado {expected}, recebido {actual}")
+                write!(
+                    f,
+                    "dimensao incompativel: esperado {expected}, recebido {actual}"
+                )
             }
             Self::EmptyVector => write!(f, "vetor nao pode ser vazio"),
             Self::ZeroNorm => write!(f, "norma do vetor e zero (impossivel normalizar)"),
