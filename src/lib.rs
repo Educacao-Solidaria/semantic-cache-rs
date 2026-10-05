@@ -7,8 +7,10 @@ pub mod domain;
 pub mod error;
 pub mod math;
 pub mod mcp;
+pub mod codec;
 pub mod metric;
 
+pub use codec::{deserialize_entry, deserialize_vector, serialize_entry, serialize_vector, BinaryCodec, BincodeCodec};
 pub use error::{CacheError, CacheResult};
 pub use math::{CosineDistance, NormalizedVector};
 pub use metric::{CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator};
