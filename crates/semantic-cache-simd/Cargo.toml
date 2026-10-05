@@ -1,0 +1,31 @@
+# Detecção de CPU e (nas próximas fases) os kernels SIMD de similaridade.
+# Raiz de workspace própria, como o servidor e o testkit, até a unificação.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "semantic-cache-simd"
+description = "Detecção de instruções SIMD e seleção de kernel do semantic-cache-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
+repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
+publish = false
+
+[features]
+# Considera AVX-512 na seleção. Desligado por padrão: em parte dos Intel o
+# AVX-512 derruba a frequência do núcleo inteiro, e o ganho só se paga em
+# lotes grandes — liga-se depois de medir no hardware de produção.
+avx512 = []
+
+[lints.rust]
+# `deny`, não `forbid`: os kernels SIMD vão precisar de `#[allow(unsafe_code)]`
+# local, justificado e protegido pela detecção deste crate.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
