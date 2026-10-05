@@ -18,8 +18,12 @@ publish = false
 # `dep = { workspace = true }` e herda daqui.
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 
@@ -61,7 +65,13 @@ publish.workspace = true
 [dependencies]
 serde = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 # jemalloc não compila com o toolchain MSVC; lá o servidor fica no alocador
 # do sistema e `alloc::stats()` devolve `None`.

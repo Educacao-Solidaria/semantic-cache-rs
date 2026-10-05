@@ -6,6 +6,7 @@
 pub mod alloc;
 pub mod build_info;
 pub mod config;
+pub mod logging;
 
 /// Nome do binário, usado em logs e na saída de `--version`.
 pub const NAME: &str = env!("CARGO_PKG_NAME");

@@ -1,8 +1,10 @@
 use std::process::ExitCode;
 
-use semantic_cache_server::{alloc, banner, build_info, config::Config};
+use semantic_cache_server::{alloc, build_info, config::Config, logging};
+use tracing::{info, info_span, Instrument};
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", build_info::version_line());
         return ExitCode::SUCCESS;
@@ -14,10 +16,26 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    println!("{} (alocador: {})", banner(), alloc::ALLOCATOR);
-    println!(
-        "capacidade={} ttl={}s min_score={}",
-        config.cache.max_capacity, config.cache.default_ttl_secs, config.similarity.min_score
-    );
+    if let Err(err) = logging::init(&config.log) {
+        eprintln!("erro ao iniciar o logging: {err}");
+        return ExitCode::from(2);
+    }
+
+    async {
+        info!(
+            version = build_info::version_line(),
+            allocator = alloc::ALLOCATOR,
+            heap_bytes = alloc::stats().map(|s| s.allocated),
+            "servidor iniciado"
+        );
+        info!(
+            max_capacity = config.cache.max_capacity,
+            default_ttl_secs = config.cache.default_ttl_secs,
+            min_score = %config.similarity.min_score,
+            "configuração carregada"
+        );
+    }
+    .instrument(info_span!("startup"))
+    .await;
     ExitCode::SUCCESS
 }
