@@ -1,0 +1,41 @@
+# Ferramental de teste e medição: harness de benchmarks, fixtures e asserções
+# compartilhadas. Nunca entra no binário do servidor (`publish = false`, sem
+# dependentes fora de `[dev-dependencies]`).
+#
+# Raiz de workspace própria, como o servidor: isola do manifest da raiz até a
+# unificação dos workspaces.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "semantic-cache-testkit"
+description = "Harness de benchmarks e utilitários de teste do semantic-cache-rs"
+version = "0.1.0"
+edition = "2021"
+# 1.86: MSRV do criterion 0.8 (o servidor segue em 1.80).
+rust-version = "1.86"
+authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
+repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
+publish = false
+
+[dependencies]
+# Sem `plotters`/HTML: o relatório estatístico (média, IC 95%, outliers e
+# detecção de regressão) sai no terminal e em `target/criterion/**/*.json`.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[dev-dependencies]
+# Crate de domínio da raiz: alvo dos benchmarks de similaridade.
+semantic-cache-rs = { path = "../.." }
+
+[[bench]]
+name = "similarity"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

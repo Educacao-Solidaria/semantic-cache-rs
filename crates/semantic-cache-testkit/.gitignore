@@ -1,0 +1,3 @@
+/target
+# A raiz ignora Cargo.lock em qualquer nível; este crate fixa o dele.
+!Cargo.lock
