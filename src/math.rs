@@ -60,3 +60,50 @@ pub fn normalize_slice_in_place(slice: &mut [f32]) -> Result<f32, VectorError> {
     }
     Ok(norm)
 }
+
+/// Calcula a distância euclidiana ao quadrado pura entre dois slices.
+pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32, VectorError> {
+    if a.len() != b.len() {
+        return Err(VectorError::DimensionMismatch {
+            expected: a.len(),
+            actual: b.len(),
+        });
+    }
+    let sum: f32 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| {
+            let diff = x - y;
+            diff * diff
+        })
+        .sum();
+    Ok(sum)
+}
+
+/// Calcula a distância euclidiana (L2) padrão pura entre dois slices de mesma dimensão.
+pub fn euclidean_distance(a: &[f32], b: &[f32]) -> Result<f32, VectorError> {
+    let sq = squared_euclidean_distance(a, b)?;
+    Ok(sq.sqrt())
+}
+
+/// Calcula o produto escalar (dot product) puro entre dois slices de floats.
+pub fn dot_product(a: &[f32], b: &[f32]) -> Result<f32, VectorError> {
+    if a.len() != b.len() {
+        return Err(VectorError::DimensionMismatch {
+            expected: a.len(),
+            actual: b.len(),
+        });
+    }
+    Ok(a.iter().zip(b).map(|(x, y)| x * y).sum())
+}
+
+/// Calcula o produto escalar com normalização L2 em tempo de execução.
+pub fn normalized_dot_product(a: &[f32], b: &[f32]) -> Result<f32, VectorError> {
+    let dot = dot_product(a, b)?;
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return Err(VectorError::ZeroNorm);
+    }
+    Ok(dot / (norm_a * norm_b))
+}
