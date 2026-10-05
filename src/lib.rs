@@ -4,7 +4,10 @@
 //! AI systems with explicit SIMD support and Model Context Protocol (MCP) tooling.
 
 pub mod domain;
+pub mod error;
 pub mod mcp;
+
+pub use error::{CacheError, CacheResult};
 
 pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
 pub use mcp::{LookupRequest, LookupResponse, SemanticCacheEngine, StoreRequest, StoreResponse};
