@@ -10,6 +10,10 @@
 //!
 //! [similarity]
 //! min_score = 0.92
+//!
+//! [log]
+//! level = "info,semantic_cache_server=debug"
+//! format = "json"
 //! ```
 
 use std::path::PathBuf;
@@ -26,6 +30,7 @@ pub const CONFIG_PATH_VAR: &str = "SEMCACHE_CONFIG";
 pub struct Config {
     pub cache: CacheConfig,
     pub similarity: SimilarityConfig,
+    pub log: LogConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -65,6 +70,44 @@ pub struct SimilarityConfig {
 impl Default for SimilarityConfig {
     fn default() -> Self {
         Self { min_score: 0.92 }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogConfig {
+    /// Diretiva de filtro no formato do `EnvFilter` (ex.: `"info,hyper=warn"`).
+    pub level: String,
+    pub format: LogFormat,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_owned(),
+            format: LogFormat::Json,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// Uma linha JSON por evento, para agregadores de log.
+    Json,
+    /// Texto legível, para desenvolvimento local.
+    Pretty,
+}
+
+impl FromStr for LogFormat {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "json" => Ok(Self::Json),
+            "pretty" => Ok(Self::Pretty),
+            _ => Err(()),
+        }
     }
 }
 
@@ -130,6 +173,8 @@ impl Config {
             &mut self.cache.default_ttl_secs,
         )?;
         override_from(env, "SEMCACHE_MIN_SCORE", &mut self.similarity.min_score)?;
+        override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
+        override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
         Ok(())
     }
 

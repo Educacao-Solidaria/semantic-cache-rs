@@ -75,3 +75,29 @@ fn out_of_range_values_are_invalid() {
         assert!(matches!(err, ConfigError::Invalid(_)), "{vars:?}: {err}");
     }
 }
+
+#[test]
+fn log_settings_come_from_toml_and_env() {
+    use semantic_cache_server::config::LogFormat;
+
+    let config = Config::from_toml("[log]\nformat = \"pretty\"\n").unwrap();
+    assert_eq!(config.log.format, LogFormat::Pretty);
+    assert_eq!(config.log.level, "info");
+
+    let config = Config::load_with(env(&[
+        ("SEMCACHE_LOG_LEVEL", "debug"),
+        ("SEMCACHE_LOG_FORMAT", "pretty"),
+    ]))
+    .unwrap();
+    assert_eq!(config.log.level, "debug");
+    assert_eq!(config.log.format, LogFormat::Pretty);
+
+    let err = Config::load_with(env(&[("SEMCACHE_LOG_FORMAT", "xml")])).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::Env {
+            var: "SEMCACHE_LOG_FORMAT",
+            ..
+        }
+    ));
+}
