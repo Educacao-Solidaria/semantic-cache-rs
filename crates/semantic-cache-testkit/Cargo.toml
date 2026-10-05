@@ -26,6 +26,9 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # Crate de domínio da raiz: as fixtures devolvem os tipos dele (`Vector`,
 # `VectorBatch`) e os benchmarks medem as métricas dele.
 semantic-cache-rs = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
 
 [[bench]]
 name = "similarity"
