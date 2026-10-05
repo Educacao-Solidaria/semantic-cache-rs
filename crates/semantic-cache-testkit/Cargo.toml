@@ -13,7 +13,8 @@ name = "semantic-cache-testkit"
 description = "Harness de benchmarks e utilitários de teste do semantic-cache-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.86: MSRV do criterion 0.8 (o servidor segue em 1.80).
+rust-version = "1.86"
 authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
 repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
 publish = false
