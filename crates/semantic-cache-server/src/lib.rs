@@ -3,6 +3,8 @@
 //! Por ora expõe só a identificação do binário; os módulos de runtime
 //! (configuração, logging, alocador) entram nos PRs seguintes da Fase 1.
 
+pub mod build_info;
+
 /// Nome do binário, usado em logs e na saída de `--version`.
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 

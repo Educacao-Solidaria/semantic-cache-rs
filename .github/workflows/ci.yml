@@ -70,3 +70,20 @@ jobs:
             lock=""; [ -f "$(dirname "$m")/Cargo.lock" ] && lock="--locked"
             cargo test --manifest-path "$m" --all-targets $lock
           done
+
+  release:
+    name: build release (LTO)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/semantic-cache-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/semantic-cache-server -> target
+      - name: cargo build --release
+        run: cargo build --release --locked
+      - name: binário sai do profile release
+        run: ./target/release/semantic-cache-server --version | grep -F '(release,'

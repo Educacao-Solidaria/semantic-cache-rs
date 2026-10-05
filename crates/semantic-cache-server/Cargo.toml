@@ -1,22 +1,59 @@
-[package]
-name = "semantic-cache-server"
+# Raiz de workspace própria: isola o servidor do Cargo.toml da raiz do
+# repositório (crate de domínio `semantic-cache-rs`) até a unificação dos
+# manifests. Quando isso acontecer, as seções `[workspace.*]` e `[profile.*]`
+# sobem para o manifest da raiz e este arquivo fica só com o `[package]`.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
-description = "Binário do servidor MCP do semantic-cache-rs"
+repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
 publish = false
 
-# Raiz de workspace própria: isola este crate do Cargo.toml da raiz do
-# repositório (crate de domínio) até a unificação dos manifests.
-[workspace]
+# Versões únicas para todos os crates do workspace; cada crate declara
+# `dep = { workspace = true }` e herda daqui.
+[workspace.dependencies]
 
-[dependencies]
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Binário de latência crítica (<2ms): troca tempo de compilação por código
+# mais rápido e menor.
+[profile.release]
+opt-level = 3
+lto = true            # LTO "fat": otimiza através das fronteiras de crate
+codegen-units = 1     # uma unidade de codegen: mais inlining, build mais lento
+strip = "symbols"     # binário sem tabela de símbolos nem debuginfo
+debug = false
+incremental = false
+
+# Release com símbolos, para perf/flamegraph nos benchmarks da Fase 4:
+# `cargo build --profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"
+
+[package]
+name = "semantic-cache-server"
+description = "Binário do servidor MCP do semantic-cache-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
