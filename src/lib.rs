@@ -6,8 +6,10 @@
 pub mod domain;
 pub mod error;
 pub mod mcp;
+pub mod metric;
 
 pub use error::{CacheError, CacheResult};
+pub use metric::{CosineSimilarity, DistanceMetric, DotProduct, EuclideanDistance, SimilarityCalculator};
 
 pub use domain::{CacheEntry, Metadata, SimilarityThreshold, Vector, VectorBatch, VectorError};
 pub use mcp::{LookupRequest, LookupResponse, SemanticCacheEngine, StoreRequest, StoreResponse};
