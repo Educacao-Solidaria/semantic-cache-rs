@@ -110,11 +110,36 @@ jobs:
         with:
           components: clippy
           targets: aarch64-unknown-linux-gnu
-      # O runner é x86-64: o ramo NEON da detecção só é compilado aqui.
+      # O runner é x86-64: aqui o ramo NEON só compila (clippy cruzado); quem o
+      # executa é o job `simd-arm64`.
       - name: clippy aarch64
         run: cargo clippy --all-targets --locked --target aarch64-unknown-linux-gnu -- -D warnings
       - name: cargo test --features avx512
         run: cargo test --all-targets --locked --features avx512
+
+  simd-arm64:
+    name: simd (arm64 nativo)
+    # Runner ARM do GitHub (grátis em repositório público): os kernels NEON
+    # rodam contra a referência escalar numa CPU ARM de verdade.
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: crates/semantic-cache-simd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/semantic-cache-simd -> target
+            crates/semantic-cache-testkit -> target
+      - name: cargo test (NEON)
+        run: cargo test --all-targets --locked
+      - name: bench NEON (temporario, sai antes do merge)
+        working-directory: crates/semantic-cache-testkit
+        env:
+          SEMCACHE_BENCH_QUICK: "1"
+        run: cargo bench --locked --bench similarity -- 'similarity/(dot_slice|dot_neon|cosine|cosine_neon)/'
 
   release:
     name: build release (LTO)

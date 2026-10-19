@@ -14,6 +14,8 @@ use crate::cpu::{CpuFeatures, Kernel};
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod avx2;
+#[cfg(target_arch = "aarch64")]
+mod neon;
 
 /// Erro de entrada; espelha os casos de `VectorError` do crate de domínio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,7 +76,10 @@ impl Kernel {
             // FMA (`Kernel::supported`); comprimentos iguais conferidos acima.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::Avx2Fma | Self::Avx512 => unsafe { avx2::dot(a, b) },
-            // AVX-512 usa o kernel AVX2 até ter o próprio; NEON, o escalar.
+            // SAFETY: `runnable` só devolve `Neon` se a CPU tem NEON.
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => unsafe { neon::dot(a, b) },
+            // AVX-512 usa o kernel AVX2 até ter o próprio.
             _ => scalar::dot(a, b),
         })
     }
@@ -93,6 +98,8 @@ impl Kernel {
             // SAFETY: como em `Kernel::dot`.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::Avx2Fma | Self::Avx512 => unsafe { avx2::dot_norms(a, b) },
+            #[cfg(target_arch = "aarch64")]
+            Self::Neon => unsafe { neon::dot_norms(a, b) },
             _ => scalar::dot_norms(a, b),
         };
         // Mesma conta da referência: `dot / (sqrt(|a|²) * sqrt(|b|²))`.
@@ -198,8 +205,8 @@ mod tests {
             .collect()
     }
 
-    /// Comprimentos que passam por todo caminho do kernel AVX2: laço de 32,
-    /// passos de 8 e cauda de 0 a 7, além das dimensões de embedding.
+    /// Comprimentos que passam por todo caminho dos kernels — laço de 32/16
+    /// floats, passos de 8/4 e cauda (AVX2/NEON) — e dimensões de embedding.
     const LENS: [usize; 13] = [0, 1, 7, 8, 9, 15, 31, 32, 33, 71, 384, 1536, 3073];
 
     #[test]
