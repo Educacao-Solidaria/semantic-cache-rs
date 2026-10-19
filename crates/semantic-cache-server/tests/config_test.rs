@@ -70,6 +70,11 @@ fn out_of_range_values_are_invalid() {
         [("SEMCACHE_MIN_SCORE", "1.5")],
         [("SEMCACHE_MIN_SCORE", "0")],
         [("SEMCACHE_MIN_SCORE", "NaN")],
+        [("SEMCACHE_MEMORY_MAX_BYTES", "0")],
+        [("SEMCACHE_MEMORY_HIGH_WATERMARK", "1.5")],
+        [("SEMCACHE_MEMORY_LOW_WATERMARK", "0.9")], // = alta
+        [("SEMCACHE_MEMORY_LOW_WATERMARK", "-0.1")],
+        [("SEMCACHE_MEMORY_LOW_WATERMARK", "NaN")],
     ] {
         let err = Config::load_with(env(&vars)).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "{vars:?}: {err}");
@@ -99,5 +104,32 @@ fn log_settings_come_from_toml_and_env() {
             var: "SEMCACHE_LOG_FORMAT",
             ..
         }
+    ));
+}
+
+#[test]
+fn memory_budget_comes_from_toml_and_env() {
+    use semantic_cache_server::config::MemoryConfig;
+    use semantic_cache_server::memory::MemoryBudget;
+
+    let config = Config::from_toml("[memory]\nmax_bytes = 4096\n").unwrap();
+    assert_eq!(config.memory.max_bytes, 4096);
+    assert!((config.memory.high_watermark - 0.9).abs() < f64::EPSILON);
+
+    let config = Config::load_with(env(&[
+        ("SEMCACHE_MEMORY_MAX_BYTES", "2048"),
+        ("SEMCACHE_MEMORY_LOW_WATERMARK", "0.5"),
+    ]))
+    .unwrap();
+    assert!((config.memory.low_watermark - 0.5).abs() < f64::EPSILON);
+    assert_eq!(MemoryBudget::new(&config.memory).unwrap().limit(), 2048);
+
+    let zero = MemoryConfig {
+        max_bytes: 0,
+        ..MemoryConfig::default()
+    };
+    assert!(matches!(
+        MemoryBudget::new(&zero),
+        Err(ConfigError::Invalid(_))
     ));
 }

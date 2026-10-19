@@ -11,6 +11,11 @@
 //! [similarity]
 //! min_score = 0.92
 //!
+//! [memory]
+//! max_bytes = 1073741824
+//! high_watermark = 0.9
+//! low_watermark = 0.8
+//!
 //! [log]
 //! level = "info,semantic_cache_server=debug"
 //! format = "json"
@@ -30,6 +35,7 @@ pub const CONFIG_PATH_VAR: &str = "SEMCACHE_CONFIG";
 pub struct Config {
     pub cache: CacheConfig,
     pub similarity: SimilarityConfig,
+    pub memory: MemoryConfig,
     pub log: LogConfig,
 }
 
@@ -70,6 +76,47 @@ pub struct SimilarityConfig {
 impl Default for SimilarityConfig {
     fn default() -> Self {
         Self { min_score: 0.92 }
+    }
+}
+
+/// Orçamento de memória do cache ([`crate::memory::MemoryBudget`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// Teto estrito, em bytes, do que o cache reserva.
+    pub max_bytes: usize,
+    /// Fração do teto em que o despejo preventivo começa.
+    pub high_watermark: f64,
+    /// Fração do teto até onde o despejo libera.
+    pub low_watermark: f64,
+}
+
+impl Default for MemoryConfig {
+    /// 1 GiB: 100 mil embeddings de 1536 dimensões em `f32` (o
+    /// `max_capacity` padrão) ocupam 614 MB, e o resto fica para os textos.
+    fn default() -> Self {
+        Self {
+            max_bytes: 1 << 30,
+            high_watermark: 0.9,
+            low_watermark: 0.8,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// # Errors
+    /// Teto zero, ou marcas fora de `0 <= low_watermark < high_watermark <= 1`.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_bytes == 0 {
+            return Err(ConfigError::Invalid("memory.max_bytes deve ser > 0"));
+        }
+        let (low, high) = (self.low_watermark, self.high_watermark);
+        if !((0.0..high).contains(&low) && high <= 1.0) {
+            return Err(ConfigError::Invalid(
+                "memory: deve valer 0 <= low_watermark < high_watermark <= 1",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -173,13 +220,25 @@ impl Config {
             &mut self.cache.default_ttl_secs,
         )?;
         override_from(env, "SEMCACHE_MIN_SCORE", &mut self.similarity.min_score)?;
+        override_from(env, "SEMCACHE_MEMORY_MAX_BYTES", &mut self.memory.max_bytes)?;
+        override_from(
+            env,
+            "SEMCACHE_MEMORY_HIGH_WATERMARK",
+            &mut self.memory.high_watermark,
+        )?;
+        override_from(
+            env,
+            "SEMCACHE_MEMORY_LOW_WATERMARK",
+            &mut self.memory.low_watermark,
+        )?;
         override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
         override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
         Ok(())
     }
 
     /// # Errors
-    /// Capacidade ou TTL zerados, ou threshold fora de `(0, 1]`.
+    /// Capacidade ou TTL zerados, threshold fora de `(0, 1]` ou orçamento de
+    /// memória inválido ([`MemoryConfig::validate`]).
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache.max_capacity == 0 {
             return Err(ConfigError::Invalid("cache.max_capacity deve ser > 0"));
@@ -193,7 +252,7 @@ impl Config {
                 "similarity.min_score deve estar em (0, 1]",
             ));
         }
-        Ok(())
+        self.memory.validate()
     }
 }
 
