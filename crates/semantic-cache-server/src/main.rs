@@ -32,6 +32,7 @@ async fn main() -> ExitCode {
             max_capacity = config.cache.max_capacity,
             default_ttl_secs = config.cache.default_ttl_secs,
             min_score = %config.similarity.min_score,
+            memory_max_bytes = config.memory.max_bytes,
             "configuração carregada"
         );
     }

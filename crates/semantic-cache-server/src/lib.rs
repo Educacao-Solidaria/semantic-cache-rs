@@ -1,12 +1,11 @@
-//! Servidor MCP do semantic-cache-rs.
-//!
-//! Por ora expõe só a identificação do binário; os módulos de runtime
-//! (configuração, logging, alocador) entram nos PRs seguintes da Fase 1.
+//! Servidor MCP do semantic-cache-rs: identificação do binário, configuração,
+//! logging, alocador e orçamento de memória do cache.
 
 pub mod alloc;
 pub mod build_info;
 pub mod config;
 pub mod logging;
+pub mod memory;
 
 /// Nome do binário, usado em logs e na saída de `--version`.
 pub const NAME: &str = env!("CARGO_PKG_NAME");
