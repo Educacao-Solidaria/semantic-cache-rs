@@ -12,14 +12,21 @@
 //! voltar; `async` volta da memória e o sled grava em lote a cada
 //! `flush_interval_ms` — numa queda, perde-se no máximo esse intervalo. Ao ser
 //! descartado, o sled grava o que estiver pendente.
+//!
+//! Escritores concorrentes usam [`SledStore::put`] e [`SledStore::remove`],
+//! por referência compartilhada. No modo `sync`, quem chega enquanto um flush
+//! grava espera o próximo, que serve a todos ([`GroupCommit`]): um fsync por
+//! lote, e cada escritor só volta com a própria escrita em disco.
 
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
 use semantic_cache_rs::{deserialize_entry, serialize_entry, CacheEntry, CacheError, CacheStore};
 
 use crate::config::{Durability, PersistenceConfig};
+use crate::group_commit::GroupCommit;
 
 /// Chave da marca de formato, na árvore padrão.
 const FORMAT_KEY: &str = "semantic-cache/format";
@@ -38,8 +45,12 @@ pub struct SledStore {
     db: sled::Db,
     tree: sled::Tree,
     durability: Durability,
-    /// Contado nas escritas: o `len` do sled percorre a árvore inteira.
-    len: usize,
+    /// Contado nas escritas: o `len` do sled percorre a árvore inteira. Com
+    /// sinal porque, com `put` e `remove` concorrentes na mesma chave, a
+    /// remoção pode descontar antes de a inserção contar.
+    len: AtomicIsize,
+    /// Os flushes do modo `sync`.
+    commits: GroupCommit<sled::Error>,
 }
 
 impl SledStore {
@@ -77,12 +88,13 @@ impl SledStore {
                 )))
             }
         }
-        let len = tree.len();
+        let len = AtomicIsize::new(isize::try_from(tree.len()).unwrap_or(isize::MAX));
         Ok(Self {
             db,
             tree,
             durability: config.durability,
             len,
+            commits: GroupCommit::default(),
         })
     }
 
@@ -109,10 +121,58 @@ impl SledStore {
         })
     }
 
-    /// O fsync do modo `sync`, depois de cada escrita.
+    /// [`CacheStore::set`] por referência compartilhada: várias threads gravam
+    /// ao mesmo tempo e, no modo `sync`, dividem o flush.
+    ///
+    /// # Errors
+    ///
+    /// Entrada que não serializa ou maior que o limite de leitura do codec;
+    /// [`CacheError::Io`] do sled. No modo `sync`, um erro no flush vale para o
+    /// lote inteiro e para as escritas seguintes (ver [`GroupCommit::commit`]),
+    /// e a entrada fica na árvore mas pode não sobreviver a uma queda.
+    pub fn put(&self, key: &str, entry: &CacheEntry) -> Result<(), CacheError> {
+        let bytes = serialize_entry(entry)?;
+        // O codec recusa ler mais que isso: gravar seria perder a entrada ao
+        // reabrir.
+        if bytes.len() > DEFAULT_MAX_BINARY_SIZE {
+            return Err(CacheError::Serialization(format!(
+                "entrada '{key}' com {} bytes passa do limite de leitura ({DEFAULT_MAX_BINARY_SIZE})",
+                bytes.len()
+            )));
+        }
+        if self
+            .tree
+            .insert(key.as_bytes(), bytes)
+            .map_err(io)?
+            .is_none()
+        {
+            self.len.fetch_add(1, Relaxed);
+        }
+        self.sync()
+    }
+
+    /// [`CacheStore::evict`] por referência compartilhada, como
+    /// [`SledStore::put`].
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::Io`] do sled, inclusive o do flush no modo `sync`.
+    pub fn remove(&self, key: &str) -> Result<bool, CacheError> {
+        let removed = self.tree.remove(key).map_err(io)?.is_some();
+        if removed {
+            self.len.fetch_sub(1, Relaxed);
+        }
+        self.sync()?;
+        Ok(removed)
+    }
+
+    /// O fsync do modo `sync`, depois de cada escrita: um por lote de
+    /// escritores concorrentes.
     fn sync(&self) -> Result<(), CacheError> {
         if self.durability == Durability::Sync {
-            self.flush()?;
+            self.commits
+                .commit(|| self.db.flush().map(drop))
+                .map_err(io)?;
         }
         Ok(())
     }
@@ -124,37 +184,22 @@ impl CacheStore for SledStore {
         value.map(|bytes| decode(key, &bytes)).transpose()
     }
 
-    /// No modo `sync`, um erro depois da escrita (no fsync) quer dizer que a
-    /// entrada está na árvore mas pode não sobreviver a uma queda.
+    /// Igual a [`SledStore::put`].
     fn set(&mut self, key: String, entry: CacheEntry) -> Result<(), CacheError> {
-        let bytes = serialize_entry(&entry)?;
-        // O codec recusa ler mais que isso: gravar seria perder a entrada ao
-        // reabrir.
-        if bytes.len() > DEFAULT_MAX_BINARY_SIZE {
-            return Err(CacheError::Serialization(format!(
-                "entrada '{key}' com {} bytes passa do limite de leitura ({DEFAULT_MAX_BINARY_SIZE})",
-                bytes.len()
-            )));
-        }
-        let previous = self.tree.insert(key.as_bytes(), bytes).map_err(io)?;
-        self.len += usize::from(previous.is_none());
-        self.sync()
+        self.put(&key, &entry)
     }
 
     fn evict(&mut self, key: &str) -> Result<bool, CacheError> {
-        let removed = self.tree.remove(key).map_err(io)?.is_some();
-        self.len -= usize::from(removed);
-        self.sync()?;
-        Ok(removed)
+        self.remove(key)
     }
 
     fn len(&self) -> usize {
-        self.len
+        usize::try_from(self.len.load(Relaxed)).unwrap_or(0)
     }
 
     fn clear(&mut self) -> Result<(), CacheError> {
         self.tree.clear().map_err(io)?;
-        self.len = 0;
+        *self.len.get_mut() = 0;
         self.sync()
     }
 }
@@ -184,6 +229,9 @@ fn io(err: sled::Error) -> CacheError {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Barrier, Mutex};
+    use std::thread;
+    use std::time::Instant;
 
     use semantic_cache_rs::Vector;
 
@@ -334,5 +382,68 @@ mod tests {
             format!("{store:?}"),
             "SledStore { durability: Sync, len: 0, .. }"
         );
+    }
+
+    /// `threads` escritores ao mesmo tempo, cada um com `write(thread, i)`
+    /// para `i` em `0..per`. Devolve escritas por segundo.
+    #[allow(clippy::cast_precision_loss)]
+    fn writers(threads: usize, per: usize, write: &(dyn Fn(usize, usize) + Sync)) -> f64 {
+        let barrier = Barrier::new(threads);
+        let start = Instant::now();
+        thread::scope(|s| {
+            for t in 0..threads {
+                let barrier = &barrier;
+                s.spawn(move || {
+                    barrier.wait();
+                    (0..per).for_each(|i| write(t, i));
+                });
+            }
+        });
+        (threads * per) as f64 / start.elapsed().as_secs_f64()
+    }
+
+    #[test]
+    fn concurrent_sync_writers_leave_nothing_pending_and_survive_reopen() {
+        let dir = TempDir::new("group-commit");
+        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        let value = entry("e", 16);
+        writers(16, 10, &|t, i| {
+            store.put(&format!("{t}-{i}"), &value).unwrap();
+            if i == 9 {
+                assert_eq!(store.remove(&format!("{t}-0")), Ok(true));
+            }
+        });
+        // Cada `Ok` veio depois do flush que cobre a escrita: nada pendente.
+        assert_eq!((store.len(), store.flush().unwrap()), (16 * 9, 0));
+        drop(store);
+        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        assert_eq!(store.len(), 16 * 9, "reaberto, com tudo o que voltou Ok");
+        assert!(store.get("7-0").unwrap().is_none() && store.get("7-9").unwrap().is_some());
+    }
+
+    /// Medição, fora do CI: escritas `sync` de 6 KB com o store compartilhado
+    /// e, como antes do group commit, atrás de um `Mutex`.
+    /// `cargo test --release --lib -- --ignored --nocapture sync_writers_throughput`
+    #[test]
+    #[ignore = "medição"]
+    #[allow(clippy::cast_precision_loss)]
+    fn sync_writers_throughput() {
+        let value = entry("e", 1536);
+        for threads in [1, 8, 64] {
+            let (dir, per) = (TempDir::new(&format!("rate-{threads}")), 6400 / threads);
+            let open =
+                |name| SledStore::open(&dir.0.join(name), &config(Durability::Sync)).unwrap();
+            let store = open("shared");
+            let shared = writers(threads, per, &|t, i| {
+                store.put(&format!("{t}-{i}"), &value).unwrap();
+            });
+            let batch = (threads * per) as f64 / store.commits.flushes() as f64;
+            let locked = Mutex::new(open("mutex"));
+            let mutex = writers(threads, per, &|t, i| {
+                let mut store = locked.lock().unwrap();
+                store.set(format!("{t}-{i}"), value.clone()).unwrap();
+            });
+            println!("{threads:2} threads: Mutex {mutex:6.0}/s, group commit {shared:6.0}/s ({batch:.1} por flush)");
+        }
     }
 }
