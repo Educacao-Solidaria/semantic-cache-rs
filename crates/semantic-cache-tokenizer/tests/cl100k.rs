@@ -18,5 +18,6 @@ fn matches_tiktoken_encode_ordinary() {
     assert_eq!(tokenizer.vocab_size(), 100_256);
     for &(text, want) in CASES {
         assert_eq!(tokenizer.encode(text), want, "{text:?}");
+        assert_eq!(tokenizer.count(text), want.len(), "{text:?}");
     }
 }

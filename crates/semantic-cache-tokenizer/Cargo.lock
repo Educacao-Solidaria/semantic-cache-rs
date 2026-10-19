@@ -51,4 +51,5 @@ name = "semantic-cache-tokenizer"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "regex-syntax",
 ]
