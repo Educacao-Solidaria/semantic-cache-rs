@@ -14,49 +14,94 @@ use crate::Rank;
 /// Rank de "sem par": última parte, parte absorvida ou par fora do vocabulário.
 const NONE: Rank = Rank::MAX;
 
-/// Chama `emit` com o rank de cada parte final de `piece`, da esquerda para a
-/// direita. `ranks` contém os 256 bytes isolados (o carregador garante).
-pub(crate) fn merge(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8], mut emit: impl FnMut(Rank)) {
-    let len = piece.len();
-    // Cada parte viva é identificada pelo byte onde começa; `prev[len]` é só
-    // uma sentinela, para atualizar o anterior do fim sem testar.
-    let mut next: Vec<usize> = (1..=len).collect();
-    let mut prev: Vec<usize> = (0..=len).map(|at| at.wrapping_sub(1)).collect();
-    let pair_rank = |next: &[usize], at: usize| match next[at] {
-        right if right < len => ranks.get(&piece[at..next[right]]).copied().unwrap_or(NONE),
-        _ => NONE,
-    };
-    // Rank do par (parte, seguinte) de cada parte; `NONE` se não há par.
-    let mut rank: Vec<Rank> = (0..len).map(|at| pair_rank(&next, at)).collect();
-    // Menor rank primeiro e, no empate, o mais à esquerda.
-    let mut heap: BinaryHeap<_> = (0..len)
-        .filter(|&at| rank[at] != NONE)
-        .map(|at| Reverse((rank[at], at)))
-        .collect();
-    while let Some(Reverse((popped, at))) = heap.pop() {
-        // Entrada velha: a parte foi absorvida ou o par mudou. Os bytes de um
-        // par só crescem e cada token tem um rank, então um rank antigo não
-        // volta a valer na mesma posição.
-        if rank[at] != popped {
-            continue;
-        }
-        let absorbed = next[at];
-        next[at] = next[absorbed];
-        prev[next[at]] = at;
-        rank[absorbed] = NONE;
-        // Mudaram o par desta parte e o da anterior (a primeira nunca morre).
-        for part in [Some(at), (at > 0).then(|| prev[at])].into_iter().flatten() {
-            rank[part] = pair_rank(&next, part);
-            if rank[part] != NONE {
-                heap.push(Reverse((rank[part], part)));
+/// Capacidade que os buffers guardam entre chamadas (até ~4,5 MB por thread):
+/// um pedaço maior realoca na hora e devolve a memória no fim, em vez de
+/// deixar a thread com centenas de MB por causa de um prompt patológico.
+const RETAIN: usize = 1 << 16;
+
+/// Buffers de uma junção, reaproveitados entre pedaços e chamadas: depois do
+/// maior pedaço já visto, juntar não aloca.
+#[derive(Debug, Default)]
+pub(crate) struct Merger {
+    next: Vec<usize>,
+    prev: Vec<usize>,
+    rank: Vec<Rank>,
+    heap: BinaryHeap<Reverse<(Rank, usize)>>,
+}
+
+impl Merger {
+    /// Chama `emit` com o rank de cada parte final de `piece`, da esquerda
+    /// para a direita. `ranks` contém os 256 bytes isolados (o carregador
+    /// garante).
+    pub(crate) fn merge(
+        &mut self,
+        ranks: &HashMap<Vec<u8>, Rank>,
+        piece: &[u8],
+        mut emit: impl FnMut(Rank),
+    ) {
+        let Self {
+            next,
+            prev,
+            rank,
+            heap,
+        } = self;
+        let len = piece.len();
+        // Cada parte viva é identificada pelo byte onde começa; `prev[len]` é
+        // só uma sentinela, para atualizar o anterior do fim sem testar.
+        next.clear();
+        next.extend(1..=len);
+        prev.clear();
+        prev.extend((0..=len).map(|at| at.wrapping_sub(1)));
+        let pair_rank = |next: &[usize], at: usize| match next[at] {
+            right if right < len => ranks.get(&piece[at..next[right]]).copied().unwrap_or(NONE),
+            _ => NONE,
+        };
+        // Rank do par (parte, seguinte) de cada parte; `NONE` se não há par.
+        rank.clear();
+        rank.extend((0..len).map(|at| pair_rank(next, at)));
+        // Menor rank primeiro e, no empate, o mais à esquerda.
+        heap.clear();
+        heap.extend(
+            (0..len)
+                .filter(|&at| rank[at] != NONE)
+                .map(|at| Reverse((rank[at], at))),
+        );
+        while let Some(Reverse((popped, at))) = heap.pop() {
+            // Entrada velha: a parte foi absorvida ou o par mudou. Os bytes de
+            // um par só crescem e cada token tem um rank, então um rank antigo
+            // não volta a valer na mesma posição.
+            if rank[at] != popped {
+                continue;
+            }
+            let absorbed = next[at];
+            next[at] = next[absorbed];
+            prev[next[at]] = at;
+            rank[absorbed] = NONE;
+            // Mudaram o par desta parte e o da anterior (a primeira nunca morre).
+            for part in [Some(at), (at > 0).then(|| prev[at])].into_iter().flatten() {
+                rank[part] = pair_rank(next, part);
+                if rank[part] != NONE {
+                    heap.push(Reverse((rank[part], part)));
+                }
             }
         }
-    }
-    let mut at = 0;
-    while at < len {
-        // Toda parte final é um byte isolado ou o token de uma junção.
-        emit(ranks[&piece[at..next[at]]]);
-        at = next[at];
+        let mut at = 0;
+        while at < len {
+            // Toda parte final é um byte isolado ou o token de uma junção.
+            emit(ranks[&piece[at..next[at]]]);
+            at = next[at];
+        }
+        if len > RETAIN {
+            // `shrink_to` não desce abaixo do tamanho: esvazia antes.
+            for buf in [&mut *next, &mut *prev] {
+                buf.clear();
+                buf.shrink_to(RETAIN);
+            }
+            rank.clear();
+            rank.shrink_to(RETAIN);
+            heap.clear();
+            heap.shrink_to(RETAIN);
+        }
     }
 }
 
@@ -81,7 +126,7 @@ mod tests {
 
     fn merged(ranks: &HashMap<Vec<u8>, Rank>, piece: &[u8]) -> Vec<Rank> {
         let mut out = Vec::new();
-        merge(ranks, piece, |r| out.push(r));
+        Merger::default().merge(ranks, piece, |r| out.push(r));
         out
     }
 
@@ -104,6 +149,8 @@ mod tests {
             seed ^= seed << 17;
             usize::try_from(seed % n).unwrap()
         };
+        // Um `Merger` só para todas as rodadas: reaproveitar não vaza estado.
+        let mut merger = Merger::default();
         for _ in 0..300 {
             // Alfabeto de 3 letras: muitas junções e muitos empates.
             let mut ranks = vocab(&[]);
@@ -113,8 +160,9 @@ mod tests {
                 ranks.entry(token).or_insert(next);
             }
             let piece: Vec<u8> = (0..=rand(60)).map(|_| b"abc"[rand(3)]).collect();
-            let (got, want) = (merged(&ranks, &piece), reference(&ranks, &piece));
-            assert_eq!(got, want, "{piece:?}");
+            let mut got = Vec::new();
+            merger.merge(&ranks, &piece, |r| got.push(r));
+            assert_eq!(got, reference(&ranks, &piece), "{piece:?}");
         }
     }
 
@@ -123,9 +171,13 @@ mod tests {
         // 400 mil bytes de um par só: revarrer os pares a cada junção daria
         // ~10¹¹ comparações; com a fila são ~10⁶ operações de heap.
         let ranks = vocab(&[b"aa", b"aaaa", b"aaaaaaaa"]);
-        let out = merged(&ranks, &vec![b'a'; 400_003]);
+        let mut merger = Merger::default();
+        let mut out = Vec::new();
+        merger.merge(&ranks, &vec![b'a'; 400_003], |r| out.push(r));
         assert_eq!(out.len(), 50_002);
         assert!(out[..50_000].iter().all(|&r| r == 258));
         assert_eq!(out[50_000..], [256, 97]);
+        // E a memória do pedaço patológico não fica presa nos buffers.
+        assert!(merger.next.capacity() <= 2 * RETAIN && merger.heap.capacity() <= 2 * RETAIN);
     }
 }

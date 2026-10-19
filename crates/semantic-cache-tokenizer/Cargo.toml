@@ -16,11 +16,16 @@ repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
 publish = false
 
 [dependencies]
-# Pré-tokenização: as classes Unicode `\p{L}`/`\p{N}` do tiktoken (fancy-regex).
+# Tabelas Unicode de `\p{L}`/`\p{N}` para a pré-tokenização (as do `regex`).
+regex-syntax = "0.8"
+
+[dev-dependencies]
+# Oráculo: a pré-tokenização por regex do PR 25, comparada com a varredura.
 regex = "1"
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, não `forbid`: o teste de alocação precisa de um alocador global.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [lints.clippy]

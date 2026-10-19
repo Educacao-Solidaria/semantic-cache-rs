@@ -5,33 +5,25 @@
 //!
 //! O vocabulário não vem embutido (o arquivo tem 1,7 MB):
 //! [`Tokenizer::cl100k_base`] lê o `cl100k_base.tiktoken` público e o compila
-//! uma vez num mapa bytes → rank.
+//! uma vez num mapa bytes → rank. [`Tokenizer::count`] dá o número de tokens
+//! sem alocar, para medir prompt no caminho quente.
 
 mod bpe;
+mod pretok;
 mod vocab;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::{fmt, io};
-
-use regex::Regex;
 
 /// Id de um token: o rank dele no vocabulário.
 pub type Rank = u32;
 
-/// Pré-tokenização do `cl100k_base` no tiktoken 0.14:
-/// `'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}++|\p{N}{1,3}+| ?[^\s\p{L}\p{N}]++[\r\n]*+|\s++$|\s*[\r\n]|\s+(?!\S)|\s`
-///
-/// O crate `regex` não tem quantificador possessivo nem lookahead. Os
-/// possessivos não mudam o resultado (devolver caractere nunca faz o resto da
-/// alternativa casar), e `\s+(?!\S)|\s` vira `\s+`, cortado em `pieces`.
-static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(
-        r"'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}",
-        r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s+$|\s*[\r\n]|\s+",
-    ))
-    .expect("expressão fixa e válida")
-});
+thread_local! {
+    /// Buffers do BPE de cada thread: crescem até o maior pedaço já visto
+    /// (com teto) e ficam, então contar não aloca.
+    static MERGER: RefCell<bpe::Merger> = RefCell::default();
+}
 
 /// Vocabulário carregado e pronto para codificar; `Sync`, para dividir entre
 /// threads num `Arc`.
@@ -56,6 +48,7 @@ impl Tokenizer {
     /// O erro de leitura, ou `InvalidData` (com a linha) se o arquivo está
     /// fora do formato.
     pub fn cl100k_base(vocab: impl io::BufRead) -> io::Result<Self> {
+        pretok::load_tables();
         vocab::read(vocab).map(|ranks| Self { ranks })
     }
 
@@ -69,41 +62,34 @@ impl Tokenizer {
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<Rank> {
         let mut tokens = Vec::new();
-        for piece in pieces(text) {
-            // Pedaço que já é token sai direto, como no tiktoken: o BPE nem
-            // sempre chegaria nele.
-            match self.ranks.get(piece.as_bytes()) {
-                Some(&rank) => tokens.push(rank),
-                None => bpe::merge(&self.ranks, piece.as_bytes(), |r| tokens.push(r)),
-            }
-        }
+        self.each_token(text, |rank| tokens.push(rank));
         tokens
     }
-}
 
-/// Pedaços da pré-tokenização, em ordem e cobrindo `text` inteiro.
-fn pieces(text: &str) -> impl Iterator<Item = &str> {
-    let mut start = 0;
-    std::iter::from_fn(move || {
-        // Todo caractere é letra, número, espaço ou outro: sempre há pedaço
-        // começando onde o anterior terminou.
-        let found = PATTERN.find_at(text, start)?;
-        debug_assert_eq!(found.start(), start);
-        let mut end = found.end();
-        // Só a alternativa `\s+` termina antes do fim do texto num espaço que
-        // não é quebra de linha (`\s+$` vai até o fim; `\s*[\r\n]` termina em
-        // quebra). Aí vale o `\s+(?!\S)`: com dois ou mais espaços, o último
-        // fica para o pedaço seguinte.
-        let mut chars = found.as_str().chars();
-        if let (Some(last), Some(_)) = (chars.next_back(), chars.next()) {
-            if end < text.len() && last.is_whitespace() && !matches!(last, '\r' | '\n') {
-                end -= last.len_utf8();
+    /// Quantos tokens [`Tokenizer::encode`] devolveria, sem montar o vetor e
+    /// sem alocar: a varredura não usa regex e os buffers do BPE são da
+    /// thread. Só aloca a primeira vez que a thread vê um pedaço maior que os
+    /// anteriores, e todo pedaço sem espaço acima de 64 KiB (que devolve a
+    /// memória no fim).
+    #[must_use]
+    pub fn count(&self, text: &str) -> usize {
+        let mut count = 0;
+        self.each_token(text, |_| count += 1);
+        count
+    }
+
+    fn each_token(&self, text: &str, mut emit: impl FnMut(Rank)) {
+        MERGER.with_borrow_mut(|merger| {
+            for piece in pretok::pieces(text) {
+                // Pedaço que já é token sai direto, como no tiktoken: o BPE
+                // nem sempre chegaria nele.
+                match self.ranks.get(piece.as_bytes()) {
+                    Some(&rank) => emit(rank),
+                    None => merger.merge(&self.ranks, piece.as_bytes(), &mut emit),
+                }
             }
-        }
-        let piece = &text[start..end];
-        start = end;
-        Some(piece)
-    })
+        });
+    }
 }
 
 #[cfg(test)]
@@ -118,34 +104,6 @@ mod tests {
             .chain(merges)
             .zip(0..)
             .collect()
-    }
-
-    fn split(text: &str) -> Vec<&str> {
-        pieces(text).collect()
-    }
-
-    #[test]
-    fn pieces_follow_the_cl100k_expression() {
-        assert_eq!(split("hello world"), ["hello", " world"]);
-        assert_eq!(split(""), Vec::<&str>::new());
-        // Contrações, com maiúscula e com `ſ` (que dobra para `s`).
-        let contractions = ["I", "'m", " can", "'t", " You", "'RE", " x", "'ſ"];
-        assert_eq!(split("I'm can't You'RE x'ſ"), contractions);
-        // Até 3 dígitos; pontuação leva o espaço antes e as quebras depois.
-        assert_eq!(split("12345 !!!\n\nx"), ["123", "45", " !!!\n\n", "x"]);
-        assert_eq!(split("(hello) $100"), ["(hello", ")", " $", "100"]);
-        // `\s+(?!\S)`: o último espaço vai para a palavra seguinte.
-        assert_eq!(split("a   b"), ["a", "  ", " b"]);
-        assert_eq!(split("a\t\u{3000}b 1"), ["a", "\t", "\u{3000}b", " ", "1"]);
-        // Espaços até a última quebra de linha; o resto segue a regra acima.
-        assert_eq!(split("a \n\n  b"), ["a", " \n\n", " ", " b"]);
-        assert_eq!(split("a\r\n\r\nb"), ["a", "\r\n\r\n", "b"]);
-        // `\s++$`: espaço até o fim é um pedaço só, mesmo com quebra no meio.
-        assert_eq!(split("fim \n "), ["fim", " \n "]);
-        // Marca combinante não é letra.
-        assert_eq!(split("e\u{301}"), ["e", "\u{301}"]);
-        let text = "Olá,  mundo!\r\n\t 日本語 ٣٤٥ ²³ 🎉🎉 'll ''s x  \n";
-        assert_eq!(split(text).concat(), text);
     }
 
     #[test]
@@ -163,6 +121,15 @@ mod tests {
         // Sem junção: um token por byte do UTF-8.
         assert_eq!(tok.encode("ação 🎉").len(), "ação 🎉".len());
         assert_eq!(tok.encode(""), Vec::<Rank>::new());
+        for text in [
+            "hello world",
+            "xyz xy",
+            "ação 🎉",
+            "",
+            "  \n hello\t\tworld 123456 !!",
+        ] {
+            assert_eq!(tok.count(text), tok.encode(text).len(), "{text:?}");
+        }
         assert_eq!(format!("{tok:?}"), "Tokenizer { vocab_size: 263, .. }");
     }
 }
