@@ -1,5 +1,6 @@
 //! Servidor MCP do semantic-cache-rs: identificação do binário, configuração,
-//! logging, alocador, orçamento de memória e persistência do cache.
+//! logging, alocador, orçamento de memória, persistência e leitura sem trava
+//! do estado compartilhado.
 
 pub mod alloc;
 pub mod build_info;
@@ -7,6 +8,7 @@ pub mod config;
 pub mod logging;
 pub mod memory;
 pub mod persistence;
+pub mod snapshot;
 
 /// Nome do binário, usado em logs e na saída de `--version`.
 pub const NAME: &str = env!("CARGO_PKG_NAME");
