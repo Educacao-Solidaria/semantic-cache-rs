@@ -29,13 +29,16 @@ semantic-cache-rs = { path = "../.." }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-
-[dev-dependencies]
-# Kernels SIMD medidos lado a lado com a referência escalar no bench.
+# Kernels SIMD: medidos lado a lado com a referência no bench de
+# similaridade, e o motor das varreduras lineares do harness de estresse.
 semantic-cache-simd = { path = "../semantic-cache-simd" }
 
 [[bench]]
 name = "similarity"
+harness = false
+
+[[bench]]
+name = "stress"
 harness = false
 
 [lints.rust]
