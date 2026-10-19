@@ -1,0 +1,338 @@
+//! Persistência do cache em disco: um [`CacheStore`] sobre o sled, banco
+//! embutido com log estruturado, operações atômicas e recuperação depois de
+//! queda.
+//!
+//! Formato: a árvore `entries` guarda chave do cache (UTF-8) → `CacheEntry` no
+//! bincode do crate de domínio (`serialize_entry`). A árvore padrão guarda a
+//! marca do formato (magia e versão), conferida ao abrir: banco de outra
+//! versão é recusado em vez de lido errado, e uma migração futura sabe de onde
+//! parte.
+//!
+//! Durabilidade ([`Durability`]): `sync` faz o fsync antes de cada escrita
+//! voltar; `async` volta da memória e o sled grava em lote a cada
+//! `flush_interval_ms` — numa queda, perde-se no máximo esse intervalo. Ao ser
+//! descartado, o sled grava o que estiver pendente.
+
+use std::fmt;
+use std::path::Path;
+
+use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
+use semantic_cache_rs::{deserialize_entry, serialize_entry, CacheEntry, CacheError, CacheStore};
+
+use crate::config::{Durability, PersistenceConfig};
+
+/// Chave da marca de formato, na árvore padrão.
+const FORMAT_KEY: &str = "semantic-cache/format";
+/// Magia e versão (`u16` big-endian). Mudou o formato das entradas: suba a
+/// versão e migre ao abrir.
+const FORMAT: [u8; 6] = *b"SCRS\x00\x01";
+const ENTRIES: &str = "entries";
+/// Cache de páginas do sled. O padrão dele é 1 GiB, que somaria ao orçamento
+/// de memória do cache; aqui o banco é um log escrito o tempo todo e lido
+/// inteiro só ao subir.
+/// ponytail: teto fixo; vira configuração se a leitura a quente pesar.
+const PAGE_CACHE_BYTES: u64 = 64 << 20;
+
+/// Entradas do cache gravadas num banco sled.
+pub struct SledStore {
+    db: sled::Db,
+    tree: sled::Tree,
+    durability: Durability,
+    /// Contado nas escritas: o `len` do sled percorre a árvore inteira.
+    len: usize,
+}
+
+impl SledStore {
+    /// Abre o banco em `path` (normalmente `config.path`), ou cria se não
+    /// existe, com a durabilidade e o intervalo de flush de `config`.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::Io`] se o sled não abre (diretório inacessível, banco já
+    /// aberto por outro processo); [`CacheError::CorruptedData`] se o banco
+    /// tem outro formato, ou entradas sem a marca.
+    pub fn open(path: &Path, config: &PersistenceConfig) -> Result<Self, CacheError> {
+        let flush_every = match config.durability {
+            Durability::Sync => None, // cada escrita já grava
+            Durability::Async => Some(config.flush_interval_ms),
+        };
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(PAGE_CACHE_BYTES)
+            .flush_every_ms(flush_every)
+            .open()
+            .map_err(io)?;
+        let tree = db.open_tree(ENTRIES).map_err(io)?;
+        match db.get(FORMAT_KEY).map_err(io)? {
+            Some(found) if *found == FORMAT => {}
+            None if tree.is_empty() => {
+                db.insert(FORMAT_KEY, &FORMAT).map_err(io)?;
+                db.flush().map_err(io)?;
+            }
+            found => {
+                return Err(CacheError::corrupted(format!(
+                    "formato em disco desconhecido em {}: {:?} (esperado {FORMAT:?})",
+                    path.display(),
+                    found.as_deref()
+                )))
+            }
+        }
+        let len = tree.len();
+        Ok(Self {
+            db,
+            tree,
+            durability: config.durability,
+            len,
+        })
+    }
+
+    /// Grava em disco o que estiver pendente (fsync) e devolve quantos bytes
+    /// gravou; no modo assíncrono, é o que garante o desligamento limpo.
+    ///
+    /// # Errors
+    ///
+    /// [`CacheError::Io`] se a gravação falha.
+    pub fn flush(&self) -> Result<usize, CacheError> {
+        self.db.flush().map_err(io)
+    }
+
+    /// Todas as entradas, em ordem de chave: o que o servidor carrega na
+    /// memória ao subir. Entrada corrompida vem como erro, sem parar as
+    /// outras.
+    pub fn entries(&self) -> impl Iterator<Item = Result<(String, CacheEntry), CacheError>> + '_ {
+        self.tree.iter().map(|item| {
+            let (key, value) = item.map_err(io)?;
+            let key = String::from_utf8(key.to_vec())
+                .map_err(|_| CacheError::corrupted("chave gravada não é UTF-8"))?;
+            let entry = decode(&key, &value)?;
+            Ok((key, entry))
+        })
+    }
+
+    /// O fsync do modo `sync`, depois de cada escrita.
+    fn sync(&self) -> Result<(), CacheError> {
+        if self.durability == Durability::Sync {
+            self.flush()?;
+        }
+        Ok(())
+    }
+}
+
+impl CacheStore for SledStore {
+    fn get(&self, key: &str) -> Result<Option<CacheEntry>, CacheError> {
+        let value = self.tree.get(key).map_err(io)?;
+        value.map(|bytes| decode(key, &bytes)).transpose()
+    }
+
+    /// No modo `sync`, um erro depois da escrita (no fsync) quer dizer que a
+    /// entrada está na árvore mas pode não sobreviver a uma queda.
+    fn set(&mut self, key: String, entry: CacheEntry) -> Result<(), CacheError> {
+        let bytes = serialize_entry(&entry)?;
+        // O codec recusa ler mais que isso: gravar seria perder a entrada ao
+        // reabrir.
+        if bytes.len() > DEFAULT_MAX_BINARY_SIZE {
+            return Err(CacheError::Serialization(format!(
+                "entrada '{key}' com {} bytes passa do limite de leitura ({DEFAULT_MAX_BINARY_SIZE})",
+                bytes.len()
+            )));
+        }
+        let previous = self.tree.insert(key.as_bytes(), bytes).map_err(io)?;
+        self.len += usize::from(previous.is_none());
+        self.sync()
+    }
+
+    fn evict(&mut self, key: &str) -> Result<bool, CacheError> {
+        let removed = self.tree.remove(key).map_err(io)?.is_some();
+        self.len -= usize::from(removed);
+        self.sync()?;
+        Ok(removed)
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn clear(&mut self) -> Result<(), CacheError> {
+        self.tree.clear().map_err(io)?;
+        self.len = 0;
+        self.sync()
+    }
+}
+
+/// Sem o `Debug` do sled, que percorre e imprime a árvore inteira.
+impl fmt::Debug for SledStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SledStore")
+            .field("durability", &self.durability)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bytes que não decodificam são corrupção do disco, com a chave para achar.
+fn decode(key: &str, bytes: &[u8]) -> Result<CacheEntry, CacheError> {
+    deserialize_entry(bytes).map_err(|e| CacheError::corrupted(format!("entrada '{key}': {e}")))
+}
+
+fn io(err: sled::Error) -> CacheError {
+    match err {
+        sled::Error::Corruption { .. } => CacheError::corrupted(err.to_string()),
+        other => CacheError::Io(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use semantic_cache_rs::Vector;
+
+    use super::*;
+
+    /// Diretório temporário, apagado no fim do teste.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("semcache-{name}-{pid}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Intervalo longo: no modo `async`, só o flush manual (ou o descarte)
+    /// grava, e o teste vê o que ficou pendente.
+    fn config(durability: Durability) -> PersistenceConfig {
+        PersistenceConfig {
+            path: None,
+            durability,
+            flush_interval_ms: 3_600_000,
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn entry(id: &str, dim: usize) -> CacheEntry {
+        CacheEntry {
+            id: id.to_owned(),
+            prompt: format!("pergunta {id} — com acentuação"),
+            response: "resposta".to_owned(),
+            embedding: Vector {
+                data: (0..dim).map(|i| i as f32 / 7.0).collect(),
+            },
+            hit_count: 3,
+            created_at: 1_700_000_000,
+            ttl_seconds: 3600,
+        }
+    }
+
+    /// `CacheEntry` não tem `PartialEq`: compara pelo bincode.
+    fn same(a: &CacheEntry, b: &CacheEntry) -> bool {
+        serialize_entry(a).unwrap() == serialize_entry(b).unwrap()
+    }
+
+    #[test]
+    fn reopen_keeps_what_was_written_in_both_modes() {
+        for durability in [Durability::Sync, Durability::Async] {
+            let dir = TempDir::new(&format!("reopen-{durability:?}"));
+            let (a, b) = (entry("a", 1536), entry("b", 3));
+            {
+                let mut store = SledStore::open(&dir.0, &config(durability)).unwrap();
+                store.set("a".into(), a.clone()).unwrap();
+                for _ in 0..2 {
+                    store.set("b".into(), b.clone()).unwrap(); // regravar não conta dobrado
+                }
+                store.set("c".into(), entry("c", 1)).unwrap();
+                assert_eq!((store.evict("c"), store.evict("c")), (Ok(true), Ok(false)));
+                assert_eq!(store.len(), 2);
+            } // descartado: o sled grava o pendente
+            let store = SledStore::open(&dir.0, &config(durability)).unwrap();
+            assert_eq!(store.len(), 2, "{durability:?}");
+            assert!(same(&store.get("a").unwrap().unwrap(), &a));
+            assert!(store.get("c").unwrap().is_none());
+            let keys: Vec<String> = store.entries().map(|e| e.unwrap().0).collect();
+            assert_eq!(keys, ["a", "b"]);
+        }
+    }
+
+    #[test]
+    fn sync_flushes_before_returning_and_async_leaves_it_to_the_batch() {
+        // `flush` devolve os bytes que ainda estavam pendentes.
+        let dir = TempDir::new("durability");
+        let mut sync = SledStore::open(&dir.0.join("sync"), &config(Durability::Sync)).unwrap();
+        let mut batch = SledStore::open(&dir.0.join("async"), &config(Durability::Async)).unwrap();
+        for i in 0..20 {
+            sync.set(format!("k{i}"), entry("k", 64)).unwrap();
+            assert_eq!(sync.flush().unwrap(), 0, "sync: nada pendente na volta");
+            batch.set(format!("k{i}"), entry("k", 64)).unwrap();
+            assert!(
+                batch.flush().unwrap() > 0,
+                "async: a escrita ficou para o lote"
+            );
+        }
+        assert!(sync.evict("k0").unwrap());
+        sync.clear().unwrap();
+        assert_eq!((sync.len(), sync.flush().unwrap()), (0, 0));
+    }
+
+    #[test]
+    fn unknown_format_and_corrupted_entries_are_errors_not_garbage() {
+        let dir = TempDir::new("format");
+        let open = || SledStore::open(&dir.0, &config(Durability::Sync));
+        let raw = |f: &dyn Fn(&sled::Db)| f(&sled::open(&dir.0).unwrap());
+        drop(open().unwrap());
+        raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x02".as_slice()).unwrap()));
+        let err = open().unwrap_err();
+        assert!(
+            matches!(err, CacheError::CorruptedData(ref m) if m.contains("formato")),
+            "{err}"
+        );
+        // Entradas sem marca de formato: dado de origem desconhecida.
+        raw(&|db| {
+            db.remove(FORMAT_KEY).unwrap();
+            let entries = db.open_tree(ENTRIES).unwrap();
+            entries.insert("x", b"lixo".as_slice()).unwrap();
+            entries
+                .insert([0xff], serialize_entry(&entry("y", 2)).unwrap())
+                .unwrap();
+        });
+        assert!(matches!(open(), Err(CacheError::CorruptedData(_))));
+        // Marca certa: a entrada corrompida vira erro com a chave, sem panic.
+        raw(&|db| drop(db.insert(FORMAT_KEY, FORMAT.as_slice()).unwrap()));
+        let store = open().unwrap();
+        let err = store.get("x").unwrap_err();
+        assert!(
+            matches!(err, CacheError::CorruptedData(ref m) if m.contains("'x'")),
+            "{err}"
+        );
+        assert_eq!(
+            store.entries().filter(Result::is_err).count(),
+            2,
+            "valor e chave"
+        );
+    }
+
+    #[test]
+    fn entry_too_big_to_read_back_is_refused_on_write() {
+        let dir = TempDir::new("big");
+        let mut store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        let mut huge = entry("h", 1);
+        huge.response = "x".repeat(DEFAULT_MAX_BINARY_SIZE);
+        let err = store.set("h".into(), huge).unwrap_err();
+        assert!(
+            matches!(err, CacheError::Serialization(ref m) if m.contains("'h'")),
+            "{err}"
+        );
+        assert!(store.is_empty() && store.get("h").unwrap().is_none());
+        assert_eq!(
+            format!("{store:?}"),
+            "SledStore { durability: Sync, len: 0, .. }"
+        );
+    }
+}

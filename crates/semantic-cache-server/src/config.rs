@@ -16,6 +16,11 @@
 //! high_watermark = 0.9
 //! low_watermark = 0.8
 //!
+//! [persistence]
+//! path = "/var/lib/semantic-cache"
+//! durability = "async"
+//! flush_interval_ms = 500
+//!
 //! [log]
 //! level = "info,semantic_cache_server=debug"
 //! format = "json"
@@ -36,6 +41,7 @@ pub struct Config {
     pub cache: CacheConfig,
     pub similarity: SimilarityConfig,
     pub memory: MemoryConfig,
+    pub persistence: PersistenceConfig,
     pub log: LogConfig,
 }
 
@@ -117,6 +123,50 @@ impl MemoryConfig {
             ));
         }
         Ok(())
+    }
+}
+
+/// Persistência em disco ([`crate::persistence::SledStore`]).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PersistenceConfig {
+    /// Diretório do banco; sem ele, o cache fica só em memória.
+    pub path: Option<PathBuf>,
+    pub durability: Durability,
+    /// Intervalo do flush em lote no modo `async`, em milissegundos.
+    pub flush_interval_ms: u64,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            durability: Durability::Async,
+            flush_interval_ms: 500,
+        }
+    }
+}
+
+/// Quando a escrita chega ao disco.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Durability {
+    /// Cada escrita só volta depois do fsync.
+    Sync,
+    /// A escrita volta da memória e o disco recebe em lote; numa queda,
+    /// perde-se até um intervalo de flush.
+    Async,
+}
+
+impl FromStr for Durability {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "sync" => Ok(Self::Sync),
+            "async" => Ok(Self::Async),
+            _ => Err(()),
+        }
     }
 }
 
@@ -231,14 +281,29 @@ impl Config {
             "SEMCACHE_MEMORY_LOW_WATERMARK",
             &mut self.memory.low_watermark,
         )?;
+        if let Some(path) = env("SEMCACHE_PERSISTENCE_PATH") {
+            self.persistence.path = Some(path.into());
+        }
+        let persistence = &mut self.persistence;
+        override_from(
+            env,
+            "SEMCACHE_PERSISTENCE_DURABILITY",
+            &mut persistence.durability,
+        )?;
+        override_from(
+            env,
+            "SEMCACHE_PERSISTENCE_FLUSH_INTERVAL_MS",
+            &mut persistence.flush_interval_ms,
+        )?;
         override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
         override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
         Ok(())
     }
 
     /// # Errors
-    /// Capacidade ou TTL zerados, threshold fora de `(0, 1]` ou orçamento de
-    /// memória inválido ([`MemoryConfig::validate`]).
+    /// Capacidade ou TTL zerados, threshold fora de `(0, 1]`, orçamento de
+    /// memória inválido ([`MemoryConfig::validate`]), caminho de persistência
+    /// vazio ou intervalo de flush zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache.max_capacity == 0 {
             return Err(ConfigError::Invalid("cache.max_capacity deve ser > 0"));
@@ -250,6 +315,19 @@ impl Config {
         if !(score > 0.0 && score <= 1.0) {
             return Err(ConfigError::Invalid(
                 "similarity.min_score deve estar em (0, 1]",
+            ));
+        }
+        let persistence = &self.persistence;
+        if persistence
+            .path
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            return Err(ConfigError::Invalid("persistence.path vazio"));
+        }
+        if persistence.flush_interval_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "persistence.flush_interval_ms deve ser > 0",
             ));
         }
         self.memory.validate()

@@ -33,6 +33,7 @@ async fn main() -> ExitCode {
             default_ttl_secs = config.cache.default_ttl_secs,
             min_score = %config.similarity.min_score,
             memory_max_bytes = config.memory.max_bytes,
+            persistence = ?config.persistence.path,
             "configuração carregada"
         );
     }

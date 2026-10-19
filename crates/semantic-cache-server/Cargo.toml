@@ -26,6 +26,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tikv-jemallocator = "0.7"
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
+# Crate de domínio da raiz: `CacheEntry`, `CacheStore` e o codec bincode.
+semantic-cache-rs = { path = "../.." }
+# Banco embutido da persistência. A 0.34.7, de 2021, é a última estável (o
+# 1.0 segue em alpha); risco registrado no PR 35/100.
+sled = "0.34"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -63,7 +68,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+semantic-cache-rs = { workspace = true }
 serde = { workspace = true }
+sled = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }

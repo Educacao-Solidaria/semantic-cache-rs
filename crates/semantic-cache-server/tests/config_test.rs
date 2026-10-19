@@ -75,6 +75,8 @@ fn out_of_range_values_are_invalid() {
         [("SEMCACHE_MEMORY_LOW_WATERMARK", "0.9")], // = alta
         [("SEMCACHE_MEMORY_LOW_WATERMARK", "-0.1")],
         [("SEMCACHE_MEMORY_LOW_WATERMARK", "NaN")],
+        [("SEMCACHE_PERSISTENCE_PATH", "")],
+        [("SEMCACHE_PERSISTENCE_FLUSH_INTERVAL_MS", "0")],
     ] {
         let err = Config::load_with(env(&vars)).unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(_)), "{vars:?}: {err}");
@@ -131,5 +133,51 @@ fn memory_budget_comes_from_toml_and_env() {
     assert!(matches!(
         MemoryBudget::new(&zero),
         Err(ConfigError::Invalid(_))
+    ));
+}
+
+#[test]
+fn persistence_comes_from_toml_and_env() {
+    use semantic_cache_server::config::Durability;
+
+    assert_eq!(
+        Config::default().persistence.path,
+        None,
+        "sem caminho, só memória"
+    );
+    let toml = "[persistence]\npath = \"/var/lib/semcache\"\ndurability = \"sync\"\n";
+    let config = Config::from_toml(toml).unwrap().persistence;
+    assert_eq!(
+        config.path.as_deref(),
+        Some(std::path::Path::new("/var/lib/semcache"))
+    );
+    assert_eq!(
+        (config.durability, config.flush_interval_ms),
+        (Durability::Sync, 500)
+    );
+
+    let config = Config::load_with(env(&[
+        ("SEMCACHE_PERSISTENCE_PATH", "/tmp/semcache"),
+        ("SEMCACHE_PERSISTENCE_DURABILITY", "async"),
+        ("SEMCACHE_PERSISTENCE_FLUSH_INTERVAL_MS", "50"),
+    ]))
+    .unwrap()
+    .persistence;
+    assert_eq!(
+        config.path.as_deref(),
+        Some(std::path::Path::new("/tmp/semcache"))
+    );
+    assert_eq!(
+        (config.durability, config.flush_interval_ms),
+        (Durability::Async, 50)
+    );
+
+    let err = Config::load_with(env(&[("SEMCACHE_PERSISTENCE_DURABILITY", "fsync")])).unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigError::Env {
+            var: "SEMCACHE_PERSISTENCE_DURABILITY",
+            ..
+        }
     ));
 }
