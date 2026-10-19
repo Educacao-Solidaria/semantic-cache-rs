@@ -6,9 +6,14 @@
 //! - `SEMCACHE_BENCH_QUICK=1 cargo bench --bench stress`: 10 000 vetores.
 //! - Sob `cargo test` (sem `--bench`): carga mínima, para o harness não
 //!   apodrecer; o CI compila e roda só isso.
+//!
+//! A coluna "profiler" é o p50 / p99 da consulta segundo o profiler embutido
+//! (`semantic_cache_simd::profile`), ao lado do exato: confere o histograma.
+//! Índice que não mede a busca com `profile::time(Op::Search, ..)` sai com "—".
 
 use std::time::Duration;
 
+use semantic_cache_simd::profile::{self, Op};
 use semantic_cache_simd::Kernel;
 use semantic_cache_testkit::bench::Precision;
 use semantic_cache_testkit::stress::{FlatF32, FlatI8, Load, Report, P99_TARGET};
@@ -34,11 +39,12 @@ fn main() {
         Kernel::active()
     );
     println!(
-        "| índice | inserção p50 / p99 | consulta p50 / p95 / p99 / máx | recall@{} | p99 < {} |",
+        "| índice | inserção p50 / p99 | consulta p50 / p95 / p99 / máx | profiler p50 / p99 | recall@{} | p99 < {} |",
         load.k,
         ms(P99_TARGET)
     );
-    println!("|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|");
+    profile::set_enabled(true);
     // A busca exata vai primeiro: os resultados dela são a referência do
     // recall dos outros. Cada índice é descartado antes do próximo (pico de
     // memória de um só).
@@ -64,8 +70,14 @@ fn row(name: &str, report: &Report) {
     } else {
         "**não**"
     };
+    let profiled = profile::snapshot(Op::Search).map_or_else(
+        || "—".to_owned(),
+        |p| format!("{} / {}", ms(p.p50), ms(p.p99)),
+    );
+    // A linha seguinte conta só a carga do próximo índice.
+    profile::reset();
     println!(
-        "| {name} | {} / {} | {} / {} / {} / {} | {recall} | {verdict} |",
+        "| {name} | {} / {} | {} / {} / {} / {} | {profiled} | {recall} | {verdict} |",
         ms(insert.p50),
         ms(insert.p99),
         ms(search.p50),

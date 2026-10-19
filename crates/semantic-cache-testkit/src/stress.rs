@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use semantic_cache_simd::profile::{self, Op};
 use semantic_cache_simd::QuantizedVector;
 
 use crate::fixtures::VectorGen;
@@ -70,14 +71,16 @@ impl VectorIndex for FlatF32 {
     ///
     /// Consulta de dimensão diferente da dos vetores guardados.
     fn search(&self, query: &[f32], k: usize) -> Vec<Hit> {
-        let mut top = TopK::new(k);
-        for (id, row) in self.data.chunks_exact(self.dim.max(1)).enumerate() {
-            top.push(
-                id,
-                semantic_cache_simd::dot(query, row).expect("mesma dimensão"),
-            );
-        }
-        top.hits
+        profile::time(Op::Search, || {
+            let mut top = TopK::new(k);
+            for (id, row) in self.data.chunks_exact(self.dim.max(1)).enumerate() {
+                top.push(
+                    id,
+                    semantic_cache_simd::dot(query, row).expect("mesma dimensão"),
+                );
+            }
+            top.hits
+        })
     }
 }
 
@@ -101,17 +104,19 @@ impl VectorIndex for FlatI8 {
     ///
     /// Consulta não finita, de dimensão diferente ou toda zero.
     fn search(&self, query: &[f32], k: usize) -> Vec<Hit> {
-        let query = QuantizedVector::quantize(query).expect("consulta finita");
-        let mut top = TopK::new(k);
-        for (id, vector) in self.vectors.iter().enumerate() {
-            top.push(
-                id,
-                query
-                    .cosine(vector)
-                    .expect("mesma dimensão, norma não nula"),
-            );
-        }
-        top.hits
+        profile::time(Op::Search, || {
+            let query = QuantizedVector::quantize(query).expect("consulta finita");
+            let mut top = TopK::new(k);
+            for (id, vector) in self.vectors.iter().enumerate() {
+                top.push(
+                    id,
+                    query
+                        .cosine(vector)
+                        .expect("mesma dimensão, norma não nula"),
+                );
+            }
+            top.hits
+        })
     }
 }
 

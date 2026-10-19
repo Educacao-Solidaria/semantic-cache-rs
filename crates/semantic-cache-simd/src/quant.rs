@@ -22,6 +22,7 @@
 use std::fmt;
 
 use crate::cpu::Kernel;
+use crate::profile::{self, Op};
 use crate::similarity::{check_dims, SimilarityError};
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -72,6 +73,10 @@ impl QuantizedVector {
     ///
     /// [`NonFinite`] com a posição do primeiro `NaN` ou infinito.
     pub fn quantize(values: &[f32]) -> Result<Self, NonFinite> {
+        profile::time(Op::Quantize, || Self::quantize_untimed(values))
+    }
+
+    fn quantize_untimed(values: &[f32]) -> Result<Self, NonFinite> {
         if let Some(index) = values.iter().position(|x| !x.is_finite()) {
             return Err(NonFinite { index });
         }
@@ -134,7 +139,7 @@ impl QuantizedVector {
     #[must_use]
     pub fn dequantize(&self) -> Vec<f32> {
         let value = |&q: &i8| (self.scale * f32::from(q)).clamp(-f32::MAX, f32::MAX);
-        self.codes.iter().map(value).collect()
+        profile::time(Op::Dequantize, || self.codes.iter().map(value).collect())
     }
 
     /// Erro máximo de cada componente reconstruído: metade da escala (mais o

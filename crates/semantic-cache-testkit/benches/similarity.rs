@@ -3,7 +3,8 @@
 //! kernels do `semantic-cache-simd` medidos contra ela (`dot_<kernel>` e
 //! `cosine_<kernel>`; `SEMCACHE_SIMD=scalar` mede o mesmo caminho sem SIMD),
 //! inclusive sobre vetores quantizados em `i8` (`dot_i8_<kernel>`,
-//! `cosine_i8_<kernel>`).
+//! `cosine_i8_<kernel>`). `quantize` e `dequantize` medem a conversão, e
+//! `quantize_profiled` a mesma quantização com o profiler embutido ligado.
 //!
 //! `cargo bench` roda a rodada completa; `SEMCACHE_BENCH_QUICK=1 cargo bench`
 //! roda a curta.
@@ -13,6 +14,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use semantic_cache_rs::math::{dot_product, euclidean_distance};
 use semantic_cache_rs::{CosineDistance, DistanceMetric, NormalizedVector};
+use semantic_cache_simd::profile;
 use semantic_cache_simd::{Kernel, QuantizedVector};
 use semantic_cache_testkit::bench::{Precision, EMBEDDING_DIMS};
 use semantic_cache_testkit::fixtures::VectorGen;
@@ -69,6 +71,19 @@ fn similarity(c: &mut Criterion) {
         group.bench_with_input(i8_cosine, &dim, |bench, _| {
             bench.iter(|| black_box(&qa).cosine(black_box(&qb)));
         });
+        group.bench_with_input(BenchmarkId::new("quantize", dim), &dim, |bench, _| {
+            bench.iter(|| QuantizedVector::quantize(black_box(&a.data)));
+        });
+        group.bench_with_input(BenchmarkId::new("dequantize", dim), &dim, |bench, _| {
+            bench.iter(|| black_box(&qa).dequantize());
+        });
+        // O criterion mede na hora da chamada: só esta linha roda ligada.
+        profile::set_enabled(true);
+        let profiled = BenchmarkId::new("quantize_profiled", dim);
+        group.bench_with_input(profiled, &dim, |bench, _| {
+            bench.iter(|| QuantizedVector::quantize(black_box(&a.data)));
+        });
+        profile::set_enabled(false);
     }
     group.finish();
 }
