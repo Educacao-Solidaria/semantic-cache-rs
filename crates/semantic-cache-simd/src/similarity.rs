@@ -98,6 +98,7 @@ impl Kernel {
             // SAFETY: como em `Kernel::dot`.
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             Self::Avx2Fma | Self::Avx512 => unsafe { avx2::dot_norms(a, b) },
+            // SAFETY: como em `Kernel::dot`.
             #[cfg(target_arch = "aarch64")]
             Self::Neon => unsafe { neon::dot_norms(a, b) },
             _ => scalar::dot_norms(a, b),
