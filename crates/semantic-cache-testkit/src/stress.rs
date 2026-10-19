@@ -230,8 +230,9 @@ impl Load {
 }
 
 /// Média, por consulta, da fração dos ids de `truth` presentes em `got`.
+#[must_use]
 #[allow(clippy::cast_precision_loss)]
-fn recall(truth: &[Vec<Hit>], got: &[Vec<Hit>]) -> f64 {
+pub fn recall(truth: &[Vec<Hit>], got: &[Vec<Hit>]) -> f64 {
     let found = |(want, have): (&Vec<Hit>, &Vec<Hit>)| {
         let hits = want
             .iter()
