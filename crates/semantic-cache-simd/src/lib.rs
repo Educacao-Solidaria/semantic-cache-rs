@@ -6,8 +6,11 @@
 //!   ativo, com a referência escalar como fallback.
 //! - [`quant`]: quantização escalar de vetores `f32` em `i8` (um quarto da
 //!   memória), com produto escalar e cosseno inteiros no kernel ativo.
+//! - [`profile`]: profiler embutido, desligado por padrão, com o tempo de cada
+//!   quantização, busca e descompressão em histograma (p50, p99, máximo).
 
 pub mod cpu;
+pub mod profile;
 pub mod quant;
 pub mod similarity;
 
