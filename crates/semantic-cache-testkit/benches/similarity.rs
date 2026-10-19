@@ -5,6 +5,9 @@
 //! inclusive sobre vetores quantizados em `i8` (`dot_i8_<kernel>`,
 //! `cosine_i8_<kernel>`). `quantize` e `dequantize` medem a conversão, e
 //! `quantize_profiled` a mesma quantização com o profiler embutido ligado.
+//! `dot_<kernel>_aligned` e `dot_<kernel>_misaligned` separam o efeito do
+//! alinhamento: os mesmos valores num `AlignedVector` e 16 bytes depois de um
+//! múltiplo de 32 (o `dot_<kernel>` cai num ou noutro conforme o alocador).
 //!
 //! `cargo bench` roda a rodada completa; `SEMCACHE_BENCH_QUICK=1 cargo bench`
 //! roda a curta.
@@ -15,7 +18,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use semantic_cache_rs::math::{dot_product, euclidean_distance};
 use semantic_cache_rs::{CosineDistance, DistanceMetric, NormalizedVector};
 use semantic_cache_simd::profile;
-use semantic_cache_simd::{Kernel, QuantizedVector};
+use semantic_cache_simd::{AlignedVector, Kernel, QuantizedVector};
 use semantic_cache_testkit::bench::{Precision, EMBEDDING_DIMS};
 use semantic_cache_testkit::fixtures::VectorGen;
 
@@ -56,6 +59,22 @@ fn similarity(c: &mut Criterion) {
         let simd_dot = BenchmarkId::new(format!("dot_{kernel}"), dim);
         group.bench_with_input(simd_dot, &dim, |bench, _| {
             bench.iter(|| semantic_cache_simd::dot(black_box(&a.data), black_box(&b.data)));
+        });
+        let (aa, ab) = (
+            AlignedVector::from(a.data.as_slice()),
+            AlignedVector::from(b.data.as_slice()),
+        );
+        let aligned = BenchmarkId::new(format!("dot_{kernel}_aligned"), dim);
+        group.bench_with_input(aligned, &dim, |bench, _| {
+            bench.iter(|| semantic_cache_simd::dot(black_box(aa.padded()), black_box(ab.padded())));
+        });
+        // 4 floats na frente de um início alinhado: 16 bytes depois de um
+        // múltiplo de 32, metade das cargas em duas linhas de cache.
+        let shifted = |v: &[f32]| AlignedVector::from([&[0.0; 4], v].concat().as_slice());
+        let (sa, sb) = (shifted(&a.data), shifted(&b.data));
+        let misaligned = BenchmarkId::new(format!("dot_{kernel}_misaligned"), dim);
+        group.bench_with_input(misaligned, &dim, |bench, _| {
+            bench.iter(|| semantic_cache_simd::dot(black_box(&sa[4..]), black_box(&sb[4..])));
         });
         let simd_cosine = BenchmarkId::new(format!("cosine_{kernel}"), dim);
         group.bench_with_input(simd_cosine, &dim, |bench, _| {
