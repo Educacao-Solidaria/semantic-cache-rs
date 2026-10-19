@@ -29,8 +29,9 @@ use semantic_cache_server::snapshot::SnapshotCell;
 const WRITERS: usize = 64;
 const READERS: usize = 4;
 const DEFAULT_OPS: usize = 100;
-/// Prazo da carga padrão; um runner lento leva segundos, não isso.
-const DEADLINE: Duration = Duration::from_secs(60);
+/// Prazo da carga padrão, que levou 1 s aqui e 10,7 s no runner do GitHub
+/// (o despejo paga um sync por entrada): ~11× de folga.
+const DEADLINE: Duration = Duration::from_secs(120);
 
 /// O estado publicado: chave → bytes reservados, e os contadores mudados na
 /// mesma troca.
