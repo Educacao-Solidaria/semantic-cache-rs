@@ -1,0 +1,28 @@
+# Tokenizador BPE compatível com o cl100k_base (contar tokens sem API externa).
+# Raiz de workspace própria, como os outros crates de `crates/`.
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "semantic-cache-tokenizer"
+description = "Tokenizador BPE compatível com o cl100k_base do semantic-cache-rs"
+version = "0.1.0"
+edition = "2021"
+# 1.80: `LazyLock`.
+rust-version = "1.80"
+authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
+repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
+publish = false
+
+[dependencies]
+# Pré-tokenização: as classes Unicode `\p{L}`/`\p{N}` do tiktoken (fancy-regex).
+regex = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
