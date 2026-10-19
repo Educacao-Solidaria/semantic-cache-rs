@@ -8,12 +8,16 @@
 //!   memória), com produto escalar e cosseno inteiros no kernel ativo.
 //! - [`profile`]: profiler embutido, desligado por padrão, com o tempo de cada
 //!   quantização, busca e descompressão em histograma (p50, p99, máximo).
+//! - [`aligned`]: vetor `f32` alinhado a 32 bytes e completado com zeros até
+//!   múltiplo de 8, para nenhuma carga AVX atravessar linha de cache.
 
+pub mod aligned;
 pub mod cpu;
 pub mod profile;
 pub mod quant;
 pub mod similarity;
 
+pub use aligned::AlignedVector;
 pub use cpu::{CpuFeatures, Kernel};
 pub use quant::{NonFinite, QuantizedVector};
 pub use similarity::{cosine, dot, SimilarityError};
