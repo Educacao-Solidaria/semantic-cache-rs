@@ -130,16 +130,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            crates/semantic-cache-simd -> target
-            crates/semantic-cache-testkit -> target
+          workspaces: crates/semantic-cache-simd -> target
       - name: cargo test (NEON)
         run: cargo test --all-targets --locked
-      - name: bench NEON (temporario, sai antes do merge)
-        working-directory: crates/semantic-cache-testkit
-        env:
-          SEMCACHE_BENCH_QUICK: "1"
-        run: cargo bench --locked --bench similarity -- 'similarity/(dot_slice|dot_neon|cosine|cosine_neon)/'
 
   release:
     name: build release (LTO)
