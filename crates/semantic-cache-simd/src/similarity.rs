@@ -112,7 +112,7 @@ impl Kernel {
     }
 
     /// Este kernel, se a CPU o executa; senão o escalar.
-    fn runnable(self) -> Self {
+    pub(crate) fn runnable(self) -> Self {
         if self.supported(CpuFeatures::get()) {
             self
         } else {
@@ -121,7 +121,7 @@ impl Kernel {
     }
 }
 
-fn check_dims(a: &[f32], b: &[f32]) -> Result<(), SimilarityError> {
+pub(crate) fn check_dims<T>(a: &[T], b: &[T]) -> Result<(), SimilarityError> {
     if a.len() == b.len() {
         Ok(())
     } else {

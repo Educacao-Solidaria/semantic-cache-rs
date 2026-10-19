@@ -1,7 +1,9 @@
 //! Linha de base das métricas de similaridade de referência (escalares) do
 //! crate de domínio, nas dimensões de embedding usadas em produção, e os
 //! kernels do `semantic-cache-simd` medidos contra ela (`dot_<kernel>` e
-//! `cosine_<kernel>`; `SEMCACHE_SIMD=scalar` mede o mesmo caminho sem SIMD).
+//! `cosine_<kernel>`; `SEMCACHE_SIMD=scalar` mede o mesmo caminho sem SIMD),
+//! inclusive sobre vetores quantizados em `i8` (`dot_i8_<kernel>`,
+//! `cosine_i8_<kernel>`).
 //!
 //! `cargo bench` roda a rodada completa; `SEMCACHE_BENCH_QUICK=1 cargo bench`
 //! roda a curta.
@@ -11,7 +13,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use semantic_cache_rs::math::{dot_product, euclidean_distance};
 use semantic_cache_rs::{CosineDistance, DistanceMetric, NormalizedVector};
-use semantic_cache_simd::Kernel;
+use semantic_cache_simd::{Kernel, QuantizedVector};
 use semantic_cache_testkit::bench::{Precision, EMBEDDING_DIMS};
 use semantic_cache_testkit::fixtures::VectorGen;
 
@@ -56,6 +58,16 @@ fn similarity(c: &mut Criterion) {
         let simd_cosine = BenchmarkId::new(format!("cosine_{kernel}"), dim);
         group.bench_with_input(simd_cosine, &dim, |bench, _| {
             bench.iter(|| semantic_cache_simd::cosine(black_box(&a.data), black_box(&b.data)));
+        });
+        let quantize = |v: &[f32]| QuantizedVector::quantize(v).expect("valores finitos");
+        let (qa, qb) = (quantize(&a.data), quantize(&b.data));
+        let i8_dot = BenchmarkId::new(format!("dot_i8_{kernel}"), dim);
+        group.bench_with_input(i8_dot, &dim, |bench, _| {
+            bench.iter(|| black_box(&qa).dot(black_box(&qb)));
+        });
+        let i8_cosine = BenchmarkId::new(format!("cosine_i8_{kernel}"), dim);
+        group.bench_with_input(i8_cosine, &dim, |bench, _| {
+            bench.iter(|| black_box(&qa).cosine(black_box(&qb)));
         });
     }
     group.finish();

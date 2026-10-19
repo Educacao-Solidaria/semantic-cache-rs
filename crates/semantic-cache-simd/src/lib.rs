@@ -5,7 +5,7 @@
 //! - [`similarity`]: produto escalar e cosseno despachados para o kernel
 //!   ativo, com a referência escalar como fallback.
 //! - [`quant`]: quantização escalar de vetores `f32` em `i8` (um quarto da
-//!   memória).
+//!   memória), com produto escalar e cosseno inteiros no kernel ativo.
 
 pub mod cpu;
 pub mod quant;
