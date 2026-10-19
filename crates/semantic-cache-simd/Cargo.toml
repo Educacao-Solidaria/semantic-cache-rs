@@ -1,4 +1,4 @@
-# Detecção de CPU e (nas próximas fases) os kernels SIMD de similaridade.
+# Detecção de CPU e kernels SIMD de similaridade.
 # Raiz de workspace própria, como o servidor e o testkit, até a unificação.
 [workspace]
 members = ["."]
@@ -6,7 +6,7 @@ resolver = "2"
 
 [package]
 name = "semantic-cache-simd"
-description = "Detecção de instruções SIMD e seleção de kernel do semantic-cache-rs"
+description = "Detecção de instruções SIMD e kernels de similaridade do semantic-cache-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
@@ -19,6 +19,11 @@ publish = false
 # AVX-512 derruba a frequência do núcleo inteiro, e o ganho só se paga em
 # lotes grandes — liga-se depois de medir no hardware de produção.
 avx512 = []
+
+[dev-dependencies]
+# Referência escalar do crate de domínio: os testes comparam cada kernel com
+# ela. Só em teste; o crate em si segue sem dependências.
+semantic-cache-rs = { path = "../.." }
 
 [lints.rust]
 # `deny`, não `forbid`: os kernels SIMD vão precisar de `#[allow(unsafe_code)]`

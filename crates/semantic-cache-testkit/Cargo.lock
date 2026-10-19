@@ -302,11 +302,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "semantic-cache-simd"
+version = "0.1.0"
+
+[[package]]
 name = "semantic-cache-testkit"
 version = "0.1.0"
 dependencies = [
  "criterion",
  "semantic-cache-rs",
+ "semantic-cache-simd",
  "serde",
  "serde_json",
  "thiserror",
