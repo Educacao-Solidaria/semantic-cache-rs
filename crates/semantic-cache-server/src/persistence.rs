@@ -23,21 +23,22 @@ use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
-use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
 use semantic_cache_rs::{deserialize_entry, CacheEntry, CacheError, CacheStore};
 
 use crate::archive;
-use crate::config::{Durability, PersistenceConfig};
+use crate::config::{Compression, Durability, PersistenceConfig};
 use crate::group_commit::GroupCommit;
 
 /// Chave da marca de formato, na árvore padrão.
 const FORMAT_KEY: &str = "semantic-cache/format";
 /// Magia e versão (`u16` big-endian). Mudou o formato das entradas: suba a
-/// versão e migre ao abrir. v2: entradas em rkyv (PR 59/100).
-const FORMAT: [u8; 6] = *b"SCRS\x00\x02";
-/// Bincode; o banco sobe para v2 ao abrir, e daí o binário antigo o recusa
-/// em vez de ler errado o que for gravado depois.
+/// versão e migre ao abrir. v2: entradas em rkyv (PR 59/100); v3: entradas
+/// podem vir em LZ4 (PR 67/100).
+const FORMAT: [u8; 6] = *b"SCRS\x00\x03";
+/// Bincode e rkyv sem compressão. O banco sobe para v3 ao abrir, e daí o
+/// binário antigo o recusa em vez de ler errado o que for gravado depois.
 const FORMAT_V1: [u8; 6] = *b"SCRS\x00\x01";
+const FORMAT_V2: [u8; 6] = *b"SCRS\x00\x02";
 const ENTRIES: &str = "entries";
 /// Cache de páginas do sled. O padrão dele é 1 GiB, que somaria ao orçamento
 /// de memória do cache; aqui o banco é um log escrito o tempo todo e lido
@@ -50,6 +51,7 @@ pub struct SledStore {
     db: sled::Db,
     tree: sled::Tree,
     durability: Durability,
+    compression: Compression,
     /// Contado nas escritas: o `len` do sled percorre a árvore inteira. Com
     /// sinal porque, com `put` e `remove` concorrentes na mesma chave, a
     /// remoção pode descontar antes de a inserção contar.
@@ -81,7 +83,7 @@ impl SledStore {
         let tree = db.open_tree(ENTRIES).map_err(io)?;
         match db.get(FORMAT_KEY).map_err(io)? {
             Some(found) if *found == FORMAT => {}
-            Some(found) if *found == FORMAT_V1 => mark(&db)?,
+            Some(found) if *found == FORMAT_V1 || *found == FORMAT_V2 => mark(&db)?,
             None if tree.is_empty() => mark(&db)?,
             found => {
                 return Err(CacheError::corrupted(format!(
@@ -96,6 +98,7 @@ impl SledStore {
             db,
             tree,
             durability: config.durability,
+            compression: config.compression,
             len,
             commits: GroupCommit::default(),
         })
@@ -134,15 +137,12 @@ impl SledStore {
     /// lote inteiro e para as escritas seguintes (ver [`GroupCommit::commit`]),
     /// e a entrada fica na árvore mas pode não sobreviver a uma queda.
     pub fn put(&self, key: &str, entry: &CacheEntry) -> Result<(), CacheError> {
-        let bytes = archive::encode(entry)?;
-        // O teto de um registro: o do codec do crate de domínio, que recusa ler
-        // mais que isso (e o que um banco v1 aceitava).
-        if bytes.len() > DEFAULT_MAX_BINARY_SIZE {
-            return Err(CacheError::Serialization(format!(
-                "entrada '{key}' com {} bytes passa do limite de leitura ({DEFAULT_MAX_BINARY_SIZE})",
-                bytes.len()
-            )));
-        }
+        let bytes = archive::encode(entry, self.compression).map_err(|err| match err {
+            CacheError::Serialization(msg) => {
+                CacheError::Serialization(format!("entrada '{key}': {msg}"))
+            }
+            other => other,
+        })?;
         if self
             .tree
             .insert(key.as_bytes(), bytes)
@@ -250,6 +250,7 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
+    use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
     use semantic_cache_rs::{serialize_entry, Vector};
 
     use super::*;
@@ -279,6 +280,7 @@ mod tests {
             path: None,
             durability,
             flush_interval_ms: 3_600_000,
+            compression: Compression::Off,
         }
     }
 
@@ -352,7 +354,7 @@ mod tests {
         let open = || SledStore::open(&dir.0, &config(Durability::Sync));
         let raw = |f: &dyn Fn(&sled::Db)| f(&sled::open(&dir.0).unwrap());
         drop(open().unwrap());
-        raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x03".as_slice()).unwrap()));
+        raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x04".as_slice()).unwrap()));
         let err = open().unwrap_err();
         assert!(
             matches!(err, CacheError::CorruptedData(ref m) if m.contains("formato")),
@@ -418,17 +420,61 @@ mod tests {
     }
 
     #[test]
-    fn entry_too_big_to_read_back_is_refused_on_write() {
-        let dir = TempDir::new("big");
-        let mut store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
-        let mut huge = entry("h", 1);
-        huge.response = "x".repeat(DEFAULT_MAX_BINARY_SIZE);
-        let err = store.set("h".into(), huge).unwrap_err();
-        assert!(
-            matches!(err, CacheError::Serialization(ref m) if m.contains("'h'")),
-            "{err}"
+    fn v2_database_upgrades_and_raw_and_lz4_entries_read_with_either_setting() {
+        let dir = TempDir::new("v2");
+        {
+            // Como o PR 59/100 gravava: marca v2 e entrada rkyv sem compressão.
+            let db = sled::open(&dir.0).unwrap();
+            db.insert(FORMAT_KEY, FORMAT_V2.as_slice()).unwrap();
+            let old = archive::encode(&entry("old", 1536), Compression::Off).unwrap();
+            db.open_tree(ENTRIES).unwrap().insert("old", old).unwrap();
+        }
+        let lz4 = PersistenceConfig {
+            compression: Compression::Lz4,
+            ..config(Durability::Sync)
+        };
+        let mut new = entry("new", 1536);
+        new.response = "resposta que se repete. ".repeat(100);
+        let mut store = SledStore::open(&dir.0, &lz4).unwrap();
+        store.set("new".into(), new.clone()).unwrap();
+        assert_eq!(
+            store.tree.get("new").unwrap().unwrap()[5],
+            1,
+            "gravada em LZ4"
         );
-        assert!(store.is_empty() && store.get("h").unwrap().is_none());
+        drop(store);
+        // Desligada a compressão, as duas continuam legíveis; e a marca é v3.
+        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        assert!(same(
+            &store.get("old").unwrap().unwrap(),
+            &entry("old", 1536)
+        ));
+        assert!(same(&store.get("new").unwrap().unwrap(), &new));
+        assert_eq!(*store.db.get(FORMAT_KEY).unwrap().unwrap(), FORMAT);
+    }
+
+    #[test]
+    fn entry_too_big_to_read_back_is_refused_on_write() {
+        // Com LZ4 os 16 MiB de "x" caberiam comprimidos, mas a leitura recusa o
+        // que declara mais que o teto: conta o tamanho sem compressão.
+        for compression in [Compression::Off, Compression::Lz4] {
+            let dir = TempDir::new(&format!("big-{compression:?}"));
+            let lz4 = PersistenceConfig {
+                compression,
+                ..config(Durability::Sync)
+            };
+            let mut store = SledStore::open(&dir.0, &lz4).unwrap();
+            let mut huge = entry("h", 1);
+            huge.response = "x".repeat(DEFAULT_MAX_BINARY_SIZE);
+            let err = store.set("h".into(), huge).unwrap_err();
+            assert!(
+                matches!(err, CacheError::Serialization(ref m) if m.contains("'h'")),
+                "{err}"
+            );
+            assert!(store.is_empty() && store.get("h").unwrap().is_none());
+        }
+        let dir = TempDir::new("big");
+        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
         assert_eq!(
             format!("{store:?}"),
             "SledStore { durability: Sync, len: 0, .. }"

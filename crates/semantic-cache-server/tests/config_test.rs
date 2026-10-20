@@ -138,7 +138,7 @@ fn memory_budget_comes_from_toml_and_env() {
 
 #[test]
 fn persistence_comes_from_toml_and_env() {
-    use semantic_cache_server::config::Durability;
+    use semantic_cache_server::config::{Compression, Durability};
 
     assert_eq!(
         Config::default().persistence.path,
@@ -180,6 +180,18 @@ fn persistence_comes_from_toml_and_env() {
             ..
         }
     ));
+
+    // Compressão: desligada por padrão; "lz4" pelo TOML ou pela variável.
+    assert_eq!(Config::default().persistence.compression, Compression::Off);
+    let toml = Config::from_toml("[persistence]\ncompression = \"lz4\"\n").unwrap();
+    assert_eq!(toml.persistence.compression, Compression::Lz4);
+    let var = "SEMCACHE_PERSISTENCE_COMPRESSION";
+    let config = Config::load_with(env(&[(var, "lz4")])).unwrap();
+    assert_eq!(config.persistence.compression, Compression::Lz4);
+    let err = Config::load_with(env(&[(var, "zstd")])).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Env { var, .. } if var == "SEMCACHE_PERSISTENCE_COMPRESSION")
+    );
 }
 
 #[test]

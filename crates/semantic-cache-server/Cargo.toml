@@ -39,6 +39,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # Formato zero-copy das entradas (`archive`); com o `bytecheck` (padrão), todo
 # acesso a bytes do disco é validado.
 rkyv = "0.8"
+# Compressão opcional das entradas no disco (`archive`): LZ4 puro Rust, sem
+# `unsafe` (`safe-*`) e só o formato em bloco (sem o `frame`). A 0.14 já tem a
+# correção do RUSTSEC-2026-0041 (offset de cópia sem validar na descompressão).
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "safe-encode", "std"] }
 # Codec e servidor do IPC v1 (socket Unix; no Windows, named pipe).
 semantic-cache-ipc = { path = "../semantic-cache-ipc" }
 # `ServiceExt::oneshot` nos testes da API (já vem com o axum).
@@ -82,6 +86,7 @@ publish.workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 axum = { workspace = true }
+lz4_flex = { workspace = true }
 rkyv = { workspace = true }
 semantic-cache-ipc = { workspace = true }
 semantic-cache-rs = { workspace = true }

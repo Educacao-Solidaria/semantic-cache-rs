@@ -20,6 +20,7 @@
 //! path = "/var/lib/semantic-cache"
 //! durability = "async"
 //! flush_interval_ms = 500
+//! compression = "off"  # ou "lz4"
 //!
 //! [log]
 //! level = "info,semantic_cache_server=debug"
@@ -151,6 +152,8 @@ pub struct PersistenceConfig {
     pub durability: Durability,
     /// Intervalo do flush em lote no modo `async`, em milissegundos.
     pub flush_interval_ms: u64,
+    /// Compressão das entradas gravadas; as já gravadas leem dos dois jeitos.
+    pub compression: Compression,
 }
 
 impl Default for PersistenceConfig {
@@ -159,6 +162,30 @@ impl Default for PersistenceConfig {
             path: None,
             durability: Durability::Async,
             flush_interval_ms: 500,
+            compression: Compression::Off,
+        }
+    }
+}
+
+/// Como o corpo de uma entrada vai para o disco ([`crate::archive`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    /// Como está: a leitura usa os bytes do disco direto (zero-copy).
+    Off,
+    /// LZ4 na entrada que passa de 1 KiB e encolhe ao menos 1/8; a leitura
+    /// dela descomprime antes.
+    Lz4,
+}
+
+impl FromStr for Compression {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "lz4" => Ok(Self::Lz4),
+            _ => Err(()),
         }
     }
 }
@@ -392,6 +419,8 @@ impl Config {
             "SEMCACHE_PERSISTENCE_FLUSH_INTERVAL_MS",
             &mut persistence.flush_interval_ms,
         )?;
+        let compression = &mut persistence.compression;
+        override_from(env, "SEMCACHE_PERSISTENCE_COMPRESSION", compression)?;
         override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
         override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
         let ipc = &mut self.ipc;
