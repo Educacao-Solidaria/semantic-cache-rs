@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipe_lets_only_its_owner_in() {
+    async fn pipe_dacl_grants_access_only_to_the_owner() {
         let listener = bind_pipe(pipe("dacl")).unwrap();
         // Uma entrada só, sem herança: acesso total ao dono (OW). O padrão do
         // Windows teria SYSTEM, administradores, Everyone (WD) e anônimo (AN).
