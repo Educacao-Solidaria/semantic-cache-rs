@@ -20,7 +20,7 @@ publish = false
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
 toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -33,6 +33,12 @@ arc-swap = "1"
 # Banco embutido da persistência. A 0.34.7, de 2021, é a última estável (o
 # 1.0 segue em alpha); risco registrado no PR 35/100.
 sled = "0.34"
+# API HTTP de depuração (PR 53/100); só o necessário: HTTP/1, JSON e query.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+# Codec e servidor do IPC v1; daqui só o `shutdown_signal` por enquanto.
+semantic-cache-ipc = { path = "../semantic-cache-ipc" }
+# `ServiceExt::oneshot` nos testes da API (já vem com o axum).
+tower = { version = "0.5", features = ["util"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -71,8 +77,11 @@ publish.workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
+axum = { workspace = true }
+semantic-cache-ipc = { workspace = true }
 semantic-cache-rs = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 sled = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -81,7 +90,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+tower = { workspace = true }
 
 # jemalloc não compila com o toolchain MSVC; lá o servidor fica no alocador
 # do sistema e `alloc::stats()` devolve `None`.
