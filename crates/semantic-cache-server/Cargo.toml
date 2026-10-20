@@ -39,7 +39,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 # Formato zero-copy das entradas (`archive`); com o `bytecheck` (padrão), todo
 # acesso a bytes do disco é validado.
 rkyv = "0.8"
-# Codec e servidor do IPC v1; daqui só o `shutdown_signal` por enquanto.
+# Codec e servidor do IPC v1 (socket Unix; no Windows, named pipe).
 semantic-cache-ipc = { path = "../semantic-cache-ipc" }
 # `ServiceExt::oneshot` nos testes da API (já vem com o axum).
 tower = { version = "0.5", features = ["util"] }

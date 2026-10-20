@@ -102,6 +102,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]

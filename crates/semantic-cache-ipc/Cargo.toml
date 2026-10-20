@@ -24,8 +24,14 @@ thiserror = "1.0"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
 
+# DACL do named pipe (só o dono); já vem no lock pelo tokio.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Authorization"] }
+
 [lints.rust]
-unsafe_code = "forbid"
+# `deny`, não `forbid`: o DACL do named pipe (`server/pipe.rs`) usa FFI com
+# `allow` local e `// SAFETY:`.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [lints.clippy]

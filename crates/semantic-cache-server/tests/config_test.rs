@@ -204,7 +204,12 @@ fn http_api_is_off_and_on_loopback_unless_configured() {
 #[test]
 fn ipc_socket_defaults_to_the_contract_path() {
     let ipc = Config::default().ipc;
-    assert_eq!(ipc.socket_path.to_str(), Some("/tmp/semantic-cache.sock"));
+    let path = if cfg!(windows) {
+        r"\\.\pipe\semantic-cache"
+    } else {
+        "/tmp/semantic-cache.sock"
+    };
+    assert_eq!(ipc.socket_path.to_str(), Some(path));
     assert_eq!(ipc.drain_timeout(), Duration::from_secs(5));
     let vars = [
         ("SEMCACHE_IPC_SOCKET_PATH", "/run/sc.sock"),

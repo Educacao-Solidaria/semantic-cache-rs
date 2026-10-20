@@ -53,17 +53,20 @@ async fn main() -> ExitCode {
     }
 }
 
-/// Sobe o socket IPC e, se ligada, a API HTTP, que param no mesmo SIGINT ou
-/// SIGTERM. O socket criado sai no fim, por qualquer caminho (guarda no `Drop`).
-#[cfg(unix)]
+/// Sobe o IPC (socket Unix; no Windows, named pipe) e, se ligada, a API HTTP,
+/// que param no mesmo SIGINT ou SIGTERM (Ctrl+C ou Ctrl+Break no Windows). O
+/// socket criado sai no fim, por qualquer caminho (guarda no `Drop`).
 async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
-    use semantic_cache_ipc::server::{bind_owned, serve, shutdown_signal, Basic};
+    use semantic_cache_ipc::server::{serve, shutdown_signal, Basic};
     use std::time::Duration;
     use tokio::sync::watch;
 
-    // O tratador entra antes dos binds: um SIGTERM na partida encerra limpo.
+    // O tratador entra antes dos binds: um sinal na partida encerra limpo.
     let signal = shutdown_signal()?;
-    let (listener, _socket) = bind_owned(&config.ipc.socket_path)?;
+    #[cfg(unix)]
+    let (listener, _socket) = semantic_cache_ipc::server::bind_owned(&config.ipc.socket_path)?;
+    #[cfg(windows)]
+    let listener = semantic_cache_ipc::server::bind_pipe(&config.ipc.socket_path)?;
     let http = bind_http(config).await?;
     info!(path = %config.ipc.socket_path.display(), "ipc no ar");
     let (stop, stopping) = watch::channel(false);
@@ -92,19 +95,6 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     tokio::select! {
         ((), served) = async { tokio::join!(ipc, http) } => served?,
         () = deadline => warn!("encerramento passou do prazo; saindo com conexões abertas"),
-    }
-    Ok(())
-}
-
-/// No Windows ainda não há IPC (named pipes no PR 61/100): só a API HTTP, se
-/// ligada, até o Ctrl+C.
-#[cfg(not(unix))]
-async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
-    if let Some((listener, app)) = bind_http(config).await? {
-        let ctrl_c = async { drop(tokio::signal::ctrl_c().await) };
-        axum::serve(listener, app)
-            .with_graceful_shutdown(ctrl_c)
-            .await?;
     }
     Ok(())
 }
