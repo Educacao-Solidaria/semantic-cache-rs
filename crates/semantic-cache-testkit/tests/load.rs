@@ -41,10 +41,11 @@ fn open_fds() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
 
-/// Pico de memória residente do processo (cliente e servidor), em MiB.
-fn peak_rss_mib() -> u64 {
+/// Memória residente do processo (cliente e servidor) agora, em MiB. O
+/// `VmHWM` não serve para o pico: o kernel o atualiza tarde e perde picos.
+fn rss_mib() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    let line = status.lines().find(|l| l.starts_with("VmHWM:")).unwrap();
+    let line = status.lines().find(|l| l.starts_with("VmRSS:")).unwrap();
     let kib: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
     kib / 1024
 }
@@ -159,24 +160,33 @@ async fn fifty_thousand_queries_in_flight_over_eight_connections() {
     let cache = SearchCache::new(index, DIM, texts);
     let server = tokio::spawn(serve(listener, cache, stopped, limits));
     let base = open_fds();
+    // Já inclui os lotes montados (~42 MB de frames).
+    let before = rss_mib();
     let started = Instant::now();
     let mut clients = JoinSet::new();
     for batch in batches {
         clients.spawn(run(path.clone(), batch));
     }
+    // Recolhe os clientes e amostra a memória a cada 5 ms enquanto isso.
     let all = async {
-        while let Some(done) = clients.join_next().await {
-            done.unwrap();
+        let mut peak = before;
+        loop {
+            tokio::select! {
+                done = clients.join_next() => match done {
+                    Some(done) => done.unwrap(),
+                    None => break peak,
+                },
+                () = tokio::time::sleep(Duration::from_millis(5)) => peak = peak.max(rss_mib()),
+            }
         }
     };
-    timeout(DEADLINE, all)
+    let peak = timeout(DEADLINE, all)
         .await
         .expect("a carga passou do prazo");
     let took = started.elapsed();
     #[allow(clippy::cast_precision_loss)] // 50 000 cabe exato no f64
     let rate = QUERIES as f64 / took.as_secs_f64();
-    let rss = peak_rss_mib();
-    println!("{QUERIES} consultas em {CONNECTIONS} conexões: {took:.2?}, {rate:.0}/s, pico de RSS {rss} MiB");
+    println!("{QUERIES} consultas em {CONNECTIONS} conexões: {took:.2?}, {rate:.0}/s, RSS {before} MiB antes e no máximo {peak} MiB durante");
     // O servidor segue de pé: uma conexão nova é atendida.
     let mut conn = UnixStream::connect(&path).await.unwrap();
     conn.write_all(&encode(kind::PING, 0, 1, b"").unwrap())
