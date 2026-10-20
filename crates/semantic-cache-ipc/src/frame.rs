@@ -119,6 +119,8 @@ pub fn encode(kind: u8, flags: u16, id: u32, payload: &[u8]) -> Result<Vec<u8>, 
 /// Lê o próximo frame; `Ok(None)` se o par fecha entre dois frames. Nada é
 /// alocado antes de conferido o teto, e o payload ocupa só o que já chegou.
 /// Frame recusado conta em [`discarded_frames`] e vai para o log, sem o payload.
+/// Não é cancel-safe: cancelada no meio, o frame em curso se perde e o stream
+/// fica desalinhado; num `select!`, só quando cancelar = fechar a conexão.
 ///
 /// # Errors
 /// `BadFrame` e `TooLarge` pedem o [`FrameError::reply`] e o fechamento.
