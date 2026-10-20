@@ -1,0 +1,33 @@
+# Workspace próprio e sem depender do crate da raiz: o despachante do PR 52/100
+# pode implementar o `Handler` de qualquer crate (inclusive da raiz).
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "semantic-cache-ipc"
+description = "Protocolo IPC v1 (gateway Go <-> cache) do semantic-cache-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
+repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
+publish = false
+
+[dependencies]
+# CRC32 IEEE do contrato (o mesmo do `hash/crc32` do Go).
+crc32fast = "1"
+serde_json = "1.0"
+# bind e listen separados (0600 antes da 1ª conexão); já vem com o tokio `net`.
+socket2 = "0.6"
+thiserror = "1.0"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tracing = "0.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

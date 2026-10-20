@@ -19,6 +19,7 @@ env:
     crates/semantic-cache-testkit/Cargo.toml
     crates/semantic-cache-simd/Cargo.toml
     crates/semantic-cache-tokenizer/Cargo.toml
+    crates/semantic-cache-ipc/Cargo.toml
 
 jobs:
   fmt:
@@ -54,6 +55,7 @@ jobs:
             crates/semantic-cache-testkit -> target
             crates/semantic-cache-simd -> target
             crates/semantic-cache-tokenizer -> target
+            crates/semantic-cache-ipc -> target
       - name: cargo clippy -D warnings
         run: |
           for m in $MANIFESTS; do
@@ -76,6 +78,7 @@ jobs:
             crates/semantic-cache-testkit -> target
             crates/semantic-cache-simd -> target
             crates/semantic-cache-tokenizer -> target
+            crates/semantic-cache-ipc -> target
       - name: cargo test
         run: |
           for m in $MANIFESTS; do
