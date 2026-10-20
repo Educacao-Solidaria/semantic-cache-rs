@@ -25,6 +25,10 @@
 //! level = "info,semantic_cache_server=debug"
 //! format = "json"
 //!
+//! [ipc]
+//! socket_path = "/tmp/semantic-cache.sock"
+//! drain_timeout_ms = 5000
+//!
 //! [http]
 //! enabled = true
 //! listen = "127.0.0.1:8099"
@@ -50,6 +54,7 @@ pub struct Config {
     pub memory: MemoryConfig,
     pub persistence: PersistenceConfig,
     pub log: LogConfig,
+    pub ipc: IpcConfig,
     pub http: HttpConfig,
 }
 
@@ -216,6 +221,32 @@ impl FromStr for LogFormat {
     }
 }
 
+/// Socket do IPC v1 com o gateway (`semantic_cache_ipc`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IpcConfig {
+    /// Caminho do socket; o padrão é o do contrato (`docs/ipc-v1.md`).
+    pub socket_path: PathBuf,
+    /// Quanto o encerramento espera pelas conexões antes de abortá-las, em ms.
+    pub drain_timeout_ms: u64,
+}
+
+impl Default for IpcConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: PathBuf::from("/tmp/semantic-cache.sock"),
+            drain_timeout_ms: 5000,
+        }
+    }
+}
+
+impl IpcConfig {
+    #[must_use]
+    pub fn drain_timeout(&self) -> Duration {
+        Duration::from_millis(self.drain_timeout_ms)
+    }
+}
+
 /// API HTTP de depuração ([`crate::http`]). Desligada por padrão: ela expõe o
 /// conteúdo do cache, e no loopback qualquer usuário local alcança a porta (o
 /// socket IPC, esse, é 0600).
@@ -339,6 +370,13 @@ impl Config {
         )?;
         override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
         override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
+        let ipc = &mut self.ipc;
+        override_from(env, "SEMCACHE_IPC_SOCKET_PATH", &mut ipc.socket_path)?;
+        override_from(
+            env,
+            "SEMCACHE_IPC_DRAIN_TIMEOUT_MS",
+            &mut ipc.drain_timeout_ms,
+        )?;
         let http = &mut self.http;
         override_from(env, "SEMCACHE_HTTP_ENABLED", &mut http.enabled)?;
         override_from(env, "SEMCACHE_HTTP_LISTEN", &mut http.listen)?;
@@ -354,7 +392,8 @@ impl Config {
     /// # Errors
     /// Capacidade ou TTL zerados, threshold fora de `(0, 1]`, orçamento de
     /// memória inválido ([`MemoryConfig::validate`]), caminho de persistência
-    /// vazio, intervalo de flush zero, ou teto de corpo ou prazo HTTP zero.
+    /// ou socket IPC vazios, intervalo de flush zero, ou teto de corpo ou prazo
+    /// HTTP zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache.max_capacity == 0 {
             return Err(ConfigError::Invalid("cache.max_capacity deve ser > 0"));
@@ -380,6 +419,9 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "persistence.flush_interval_ms deve ser > 0",
             ));
+        }
+        if self.ipc.socket_path.as_os_str().is_empty() {
+            return Err(ConfigError::Invalid("ipc.socket_path vazio"));
         }
         if self.http.max_body_bytes == 0 || self.http.timeout_ms == 0 {
             return Err(ConfigError::Invalid(

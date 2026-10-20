@@ -3,8 +3,8 @@
 
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,7 +33,8 @@ pub trait Handler: Send + Sync + 'static {
 }
 
 /// Socket em `path` com permissão 0600 (outro usuário local não conecta).
-/// Caminho existente é recusado, nunca sobrescrito (a limpeza é o PR 55/100).
+/// Caminho existente é recusado, nunca sobrescrito; quem trata o resto de uma
+/// queda é o [`bind_owned`].
 ///
 /// # Errors
 /// Caminho existente, longo demais para um socket ou inacessível.
@@ -48,6 +49,71 @@ pub fn bind(path: &Path) -> io::Result<UnixListener> {
         .inspect_err(|_| {
             let _ = std::fs::remove_file(path); // criado pelo bind acima
         })
+}
+
+/// O socket que o [`bind_owned`] criou. No `Drop` (fim normal, erro ou pânico)
+/// remove o arquivo só se ele ainda for esse socket, pelo mesmo dispositivo e
+/// inode: o que outro processo pôs no caminho depois fica.
+#[derive(Debug)]
+pub struct SocketFile {
+    path: PathBuf,
+    id: (u64, u64),
+}
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        let meta = std::fs::symlink_metadata(&self.path);
+        if meta.is_ok_and(|m| (m.dev(), m.ino()) == self.id) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// [`bind`] que trata o que já está em `path`. Um socket em que ninguém escuta
+/// (resto de uma queda) é removido. Servidor vivo, caminho que não é socket
+/// (symlink não é seguido: `/tmp` é de todos) e socket que não dá para sondar
+/// (de outro usuário) fazem a partida falhar, sem apagar nada.
+///
+/// ponytail: duas partidas no mesmo instante podem ver o mesmo resto e uma
+/// apagar o socket da outra; o upgrade é uma trava (`flock`) ao lado do socket.
+///
+/// # Errors
+/// `AddrInUse` com servidor vivo, `AlreadyExists` se o caminho não é socket, e
+/// os de [`bind`].
+pub fn bind_owned(path: &Path) -> io::Result<(UnixListener, SocketFile)> {
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+        Ok(meta) if !meta.file_type().is_socket() => {
+            let msg = "o caminho existe e não é um socket";
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, msg));
+        }
+        Ok(_) => {
+            // Sonda sem bloquear: com o backlog cheio, o servidor também está vivo.
+            let probe = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+            probe.set_nonblocking(true)?;
+            match probe.connect(&SockAddr::unix(path)?) {
+                Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)?;
+                }
+                Err(err) if err.kind() != io::ErrorKind::WouldBlock => return Err(err),
+                _ => {
+                    let msg = "outro servidor escuta neste socket";
+                    return Err(io::Error::new(io::ErrorKind::AddrInUse, msg));
+                }
+            }
+        }
+    }
+    let listener = bind(path)?;
+    let meta = std::fs::symlink_metadata(path)?;
+    let id = (meta.dev(), meta.ino());
+    Ok((
+        listener,
+        SocketFile {
+            path: path.to_owned(),
+            id,
+        },
+    ))
 }
 
 /// Aceita conexões até `shutdown` resolver; aí para de aceitar, avisa as
@@ -146,7 +212,6 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::FileTypeExt;
     use std::process::Command;
     use std::time::Instant;
 
@@ -226,6 +291,43 @@ mod tests {
         assert_eq!(conn.read(&mut [0]).await.unwrap(), 0, "a conexão fecha");
         assert!(UnixStream::connect(&path).await.is_err(), "ainda aceita");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bind_owned_clears_a_dead_socket_and_removes_only_its_own() {
+        // Resto de uma queda: bind sem listen, então o connect é recusado (e um
+        // fork do teste de sinal herdando o fd não muda isso).
+        let dead = |path: &Path| {
+            let socket = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            socket.bind(&SockAddr::unix(path).unwrap()).unwrap();
+        };
+        let refused = |path: &Path| bind_owned(path).unwrap_err().kind();
+        let path = sock("owned");
+        dead(&path);
+        let (listener, file) = bind_owned(&path).unwrap();
+        assert_eq!(refused(&path), io::ErrorKind::AddrInUse);
+        drop((listener, file));
+        assert!(!path.exists(), "o socket próprio sai no drop");
+        // O que outro pôs no lugar do nosso socket fica.
+        let (listener, file) = bind_owned(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "de outro").unwrap();
+        drop((listener, file));
+        // Arquivo comum e symlink são recusados, intactos; o symlink não é
+        // seguido nem quando aponta para um socket morto.
+        assert_eq!(refused(&path), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "de outro");
+        let (link, target) = (sock("link"), sock("target"));
+        dead(&target);
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert_eq!(refused(&link), io::ErrorKind::AlreadyExists);
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        for leftover in [link, target, path] {
+            std::fs::remove_file(leftover).unwrap();
+        }
     }
 
     /// Ignora o aviso de encerramento: só o prazo da drenagem o derruba.
