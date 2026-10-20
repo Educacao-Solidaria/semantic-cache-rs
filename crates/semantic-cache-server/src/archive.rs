@@ -250,10 +250,12 @@ mod tests {
         let (raw, packed) = (encode(&e, Off).unwrap(), encode(&e, Lz4).unwrap());
         assert_eq!((raw[5], packed[5]), (0, LZ4));
         assert!(packed.len() < raw.len() - raw.len() / 8);
-        // Corpo abaixo de 1 KiB e corpo que não encolhe (bits aleatórios) vão crus.
+        // Abaixo de 1 KiB (mesmo compressível) e o que não encolhe (bits
+        // aleatórios) vão crus.
         let mut small = entry(0);
-        (small.prompt, small.response) = ("oi".into(), "olá".into());
+        (small.prompt, small.response) = ("oi".into(), "a".repeat(600));
         let mut noise = small.clone();
+        noise.response.clear();
         let mut x = 1_u32;
         noise.embedding.data = (0..2048)
             .map(|_| {
