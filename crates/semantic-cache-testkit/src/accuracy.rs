@@ -140,6 +140,10 @@ mod tests {
         fn search(&self, query: &[f32], k: usize) -> Vec<Hit> {
             self.exact.search(&self.snap(query), k)
         }
+
+        fn len(&self) -> usize {
+            self.exact.len()
+        }
     }
 
     #[test]

@@ -30,6 +30,13 @@ pub trait VectorIndex {
 
     /// Os `k` ids mais similares a `query`, do mais para o menos similar.
     fn search(&self, query: &[f32], k: usize) -> Vec<Hit>;
+
+    /// Quantos vetores guardados: o id que o próximo `insert` recebe.
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// Varredura linear exata em `f32`, com o produto escalar do kernel SIMD
@@ -82,6 +89,10 @@ impl VectorIndex for FlatF32 {
             top.hits
         })
     }
+
+    fn len(&self) -> usize {
+        self.data.len() / self.dim.max(1)
+    }
 }
 
 /// Varredura linear sobre vetores quantizados em `i8`, com o cosseno inteiro
@@ -117,6 +128,10 @@ impl VectorIndex for FlatI8 {
             }
             top.hits
         })
+    }
+
+    fn len(&self) -> usize {
+        self.vectors.len()
     }
 }
 
@@ -335,6 +350,9 @@ mod tests {
             fn insert(&mut self, _: &[f32]) {}
             fn search(&self, _: &[f32], _: usize) -> Vec<Hit> {
                 Vec::new()
+            }
+            fn len(&self) -> usize {
+                0
             }
         }
         let load = Load {
