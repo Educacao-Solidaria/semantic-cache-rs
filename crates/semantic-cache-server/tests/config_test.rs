@@ -181,3 +181,22 @@ fn persistence_comes_from_toml_and_env() {
         }
     ));
 }
+
+#[test]
+fn http_api_is_off_and_on_loopback_unless_configured() {
+    let http = Config::default().http;
+    assert!(!http.enabled && http.listen.ip().is_loopback());
+    let vars = [
+        ("SEMCACHE_HTTP_ENABLED", "true"),
+        ("SEMCACHE_HTTP_LISTEN", "0.0.0.0:9000"),
+    ];
+    let http = Config::load_with(env(&vars)).unwrap().http;
+    assert!(http.enabled && http.listen.ip().is_unspecified() && http.listen.port() == 9000);
+    for field in ["max_body_bytes", "timeout_ms"] {
+        let config = Config::from_toml(&format!("[http]\n{field} = 0\n")).unwrap();
+        assert!(
+            matches!(config.validate(), Err(ConfigError::Invalid(_))),
+            "{field}"
+        );
+    }
+}

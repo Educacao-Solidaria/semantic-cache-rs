@@ -24,8 +24,15 @@
 //! [log]
 //! level = "info,semantic_cache_server=debug"
 //! format = "json"
+//!
+//! [http]
+//! enabled = true
+//! listen = "127.0.0.1:8099"
+//! max_body_bytes = 1048576
+//! timeout_ms = 5000
 //! ```
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -43,6 +50,7 @@ pub struct Config {
     pub memory: MemoryConfig,
     pub persistence: PersistenceConfig,
     pub log: LogConfig,
+    pub http: HttpConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -208,6 +216,40 @@ impl FromStr for LogFormat {
     }
 }
 
+/// API HTTP de depuração ([`crate::http`]). Desligada por padrão: ela expõe o
+/// conteúdo do cache, e no loopback qualquer usuário local alcança a porta (o
+/// socket IPC, esse, é 0600).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+    pub enabled: bool,
+    /// Loopback por padrão; fora dele, só configurando explicitamente.
+    pub listen: SocketAddr,
+    /// Teto do corpo de um pedido, em bytes (vale também para as rotas do
+    /// PR 54/100).
+    pub max_body_bytes: usize,
+    /// Prazo de cada pedido, em milissegundos.
+    pub timeout_ms: u64,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: SocketAddr::from(([127, 0, 0, 1], 8099)),
+            max_body_bytes: 1 << 20,
+            timeout_ms: 5000,
+        }
+    }
+}
+
+impl HttpConfig {
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("falha ao ler {path}: {source}")]
@@ -297,13 +339,22 @@ impl Config {
         )?;
         override_from(env, "SEMCACHE_LOG_LEVEL", &mut self.log.level)?;
         override_from(env, "SEMCACHE_LOG_FORMAT", &mut self.log.format)?;
+        let http = &mut self.http;
+        override_from(env, "SEMCACHE_HTTP_ENABLED", &mut http.enabled)?;
+        override_from(env, "SEMCACHE_HTTP_LISTEN", &mut http.listen)?;
+        override_from(
+            env,
+            "SEMCACHE_HTTP_MAX_BODY_BYTES",
+            &mut http.max_body_bytes,
+        )?;
+        override_from(env, "SEMCACHE_HTTP_TIMEOUT_MS", &mut http.timeout_ms)?;
         Ok(())
     }
 
     /// # Errors
     /// Capacidade ou TTL zerados, threshold fora de `(0, 1]`, orçamento de
     /// memória inválido ([`MemoryConfig::validate`]), caminho de persistência
-    /// vazio ou intervalo de flush zero.
+    /// vazio, intervalo de flush zero, ou teto de corpo ou prazo HTTP zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache.max_capacity == 0 {
             return Err(ConfigError::Invalid("cache.max_capacity deve ser > 0"));
@@ -328,6 +379,11 @@ impl Config {
         if persistence.flush_interval_ms == 0 {
             return Err(ConfigError::Invalid(
                 "persistence.flush_interval_ms deve ser > 0",
+            ));
+        }
+        if self.http.max_body_bytes == 0 || self.http.timeout_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "http.max_body_bytes e http.timeout_ms devem ser > 0",
             ));
         }
         self.memory.validate()
