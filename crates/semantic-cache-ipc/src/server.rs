@@ -22,7 +22,7 @@ use crate::frame::{code, encode, error_payload, kind, read_frame, FrameError};
 pub trait Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Conn for T {}
 
-/// Aviso de encerramento: `true` = parar de ler pedidos novos.
+/// Aviso de encerramento: `true` (ou o canal fechado) = parar de ler pedidos novos.
 pub type Stop = watch::Receiver<bool>;
 
 /// Atende uma conexão; o despachante do PR 52/100 implementa este trait.
@@ -115,10 +115,8 @@ const EMPTY_STATS: &[u8] = br#"{"total_entries":0,"hit_count":0,"miss_count":0,"
 
 impl Handler for Basic {
     async fn handle<S: Conn>(&self, mut conn: S, mut stop: Stop) {
-        let Err(err) = answer(&mut conn, &mut stop).await else {
-            return;
-        };
-        if let Some(reply) = err.reply() {
+        let failed = answer(&mut conn, &mut stop).await.err();
+        if let Some(reply) = failed.as_ref().and_then(FrameError::reply) {
             let _ = conn.write_all(&reply).await; // fecha em seguida de todo jeito
         }
     }
@@ -149,7 +147,6 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::FileTypeExt;
-    use std::path::PathBuf;
     use std::process::Command;
     use std::time::Instant;
 
@@ -171,7 +168,7 @@ mod tests {
     }
 
     /// Caminho curto: o endereço de um socket Unix cabe em ~100 bytes.
-    fn sock(tag: &str) -> PathBuf {
+    fn sock(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("scipc-{}-{tag}.sock", std::process::id()))
     }
 
@@ -203,6 +200,14 @@ mod tests {
 
     #[tokio::test]
     async fn sigterm_stops_accepting_and_closes_idle_connections_at_once() {
+        // Único teste que faz fork: o `kill` herda os fds até o exec, e um connect
+        // de outro teste nesse instante passaria. O `status` espera o filho sair.
+        let pid = std::process::id().to_string();
+        let kill = |sig| Command::new("kill").args([sig, pid.as_str()]).status();
+        // SIGINT antes do 1º poll: o tratador entrou já na chamada, e o processo segue.
+        let early = shutdown_signal().unwrap();
+        assert!(kill("-INT").unwrap().success());
+        timeout(PATIENCE, early).await.unwrap();
         let path = sock("term");
         let listener = bind(&path).unwrap();
         let meta = std::fs::symlink_metadata(&path).unwrap();
@@ -215,11 +220,7 @@ mod tests {
         let ping = encode(PING, 0, 1, b"").unwrap();
         conn.write_all(&ping).await.unwrap();
         assert_eq!(next(&mut conn).await, (PONG, 1, Value::Null));
-        // Único teste que faz fork: o `kill` herda os fds até o exec, e um connect
-        // de outro teste nesse instante passaria. O `status` espera o filho sair.
-        let pid = std::process::id().to_string();
-        let kill = Command::new("kill").args(["-TERM", &pid]).status();
-        assert!(kill.unwrap().success());
+        assert!(kill("-TERM").unwrap().success());
         // A conexão ociosa recebe o aviso: o servidor sai sem esperar os 60 s.
         timeout(PATIENCE, server).await.unwrap().unwrap();
         assert_eq!(conn.read(&mut [0]).await.unwrap(), 0, "a conexão fecha");

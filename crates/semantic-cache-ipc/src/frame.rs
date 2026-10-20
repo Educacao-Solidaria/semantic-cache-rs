@@ -112,9 +112,9 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
         return Ok(None);
     }
     r.read_exact(&mut head[1..]).await?;
-    let id = u32::from_be_bytes([head[8], head[9], head[10], head[11]]);
+    let request_id = u32::from_be_bytes([head[8], head[9], head[10], head[11]]);
     let len = u32::from_be_bytes([head[12], head[13], head[14], head[15]]);
-    let bad = |reason| Err(FrameError::BadFrame(id, reason));
+    let bad = |reason| Err(FrameError::BadFrame(request_id, reason));
     if head[..4] != MAGIC {
         return bad("magic diferente de SCIP");
     }
@@ -125,7 +125,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
         return bad("flags desconhecidas");
     }
     if len > MAX_PAYLOAD {
-        return Err(FrameError::TooLarge(id, len as usize));
+        return Err(FrameError::TooLarge(request_id, len as usize));
     }
     let mut payload = vec![0; len as usize];
     r.read_exact(&mut payload).await?;
@@ -137,9 +137,8 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
     if hasher.finalize() != u32::from_be_bytes(crc) {
         return bad("crc32 não confere");
     }
-    let (kind, request_id) = (head[5], id);
     Ok(Some(Frame {
-        kind,
+        kind: head[5],
         request_id,
         payload,
     }))
