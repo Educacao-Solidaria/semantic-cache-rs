@@ -32,6 +32,15 @@ thiserror = "1.0"
 # Kernels SIMD: medidos lado a lado com a referência no bench de
 # similaridade, e o motor das varreduras lineares do harness de estresse.
 semantic-cache-simd = { path = "../semantic-cache-simd" }
+# Codec e `serve` de produção do IPC v1: o servidor de referência (`ipc`) e o
+# bench de ponta a ponta medem o mesmo caminho que o gateway usa.
+semantic-cache-ipc = { path = "../semantic-cache-ipc" }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+# O alocador do servidor no bench `ipc`: com o do sistema, o `FlatI8` (uma alocação
+# por vetor) espalha os códigos pelo heap da linha anterior e busca até 3× mais devagar.
+[target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
+tikv-jemallocator = "0.7"
 
 [[bench]]
 name = "similarity"
@@ -39,6 +48,10 @@ harness = false
 
 [[bench]]
 name = "stress"
+harness = false
+
+[[bench]]
+name = "ipc"
 harness = false
 
 [lints.rust]
