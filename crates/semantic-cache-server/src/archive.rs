@@ -104,11 +104,12 @@ pub fn encode(entry: &CacheEntry, compression: Compression) -> Result<Vec<u8>, C
 }
 
 /// Valida o registro e entrega a visão arquivada a `read`, sem desserializar.
-/// O corpo só é copiado se não estiver alinhado (o sled não promete
-/// alinhamento); a validação roda a cada chamada.
+/// O corpo cru só é copiado se não estiver alinhado (o sled não promete
+/// alinhamento); o comprimido é descomprimido antes, numa cópia. A validação
+/// roda a cada chamada.
 ///
 /// # Errors
-/// [`CacheError::CorruptedData`] com magia, versão ou bytes inválidos.
+/// [`CacheError::CorruptedData`] com magia, versão, flags ou bytes inválidos.
 pub fn with_archived<R>(
     bytes: &[u8],
     read: impl FnOnce(&ArchivedEntryRecord) -> R,
