@@ -2,7 +2,6 @@ use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use semantic_cache_ipc::server::shutdown_signal;
 use semantic_cache_server::persistence::SledStore;
 use semantic_cache_server::{alloc, build_info, config::Config, http, logging};
 use tracing::{error, info, info_span, warn, Instrument};
@@ -60,7 +59,12 @@ async fn serve_http(config: &Config) -> Result<(), Box<dyn Error>> {
         Some(path) => Some(Arc::new(SledStore::open(path, &config.persistence)?)),
         None => None,
     };
-    let shutdown = shutdown_signal()?;
+    // SIGINT/SIGTERM no Unix; no Windows (sem o `server` do IPC até o PR
+    // 61/100), o Ctrl+C.
+    #[cfg(unix)]
+    let shutdown = semantic_cache_ipc::server::shutdown_signal()?;
+    #[cfg(not(unix))]
+    let shutdown = async { drop(tokio::signal::ctrl_c().await) };
     let listener = tokio::net::TcpListener::bind(config.http.listen).await?;
     let addr = listener.local_addr()?;
     if !addr.ip().is_loopback() {
