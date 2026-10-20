@@ -88,6 +88,7 @@ async fn stats(State(state): State<Inspected>) -> Json<Value> {
         "uptime_secs": state.started.elapsed().as_secs(),
         "allocator": allocator,
         "store_entries": state.store.as_ref().map(|store| store.len()),
+        "ipc_discarded_frames": semantic_cache_ipc::frame::discarded_frames(),
     }))
 }
 
@@ -166,6 +167,7 @@ mod tests {
             (StatusCode::OK, &Value::Null)
         );
         assert_eq!(body["allocator"]["name"], alloc::ALLOCATOR);
+        assert!(body["ipc_discarded_frames"].is_u64());
         // Sem persistência a inspeção não existe; e nada aqui aceita escrita.
         assert_eq!(
             call(&router, "GET", "/cache/entries", "").await.0,

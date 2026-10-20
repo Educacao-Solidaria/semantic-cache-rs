@@ -105,6 +105,18 @@ pub fn bind_owned(path: &Path) -> io::Result<(UnixListener, SocketFile)> {
     ))
 }
 
+/// Se o diretório de `path` aceita escrita de outros usuários (ex.: `/tmp`):
+/// ali quem chegar antes toma o caminho. Em produção, o socket fica num
+/// diretório privado do serviço (`docs/ipc-v1.md`, "Segurança do socket").
+#[must_use]
+pub fn in_shared_dir(path: &Path) -> bool {
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    std::fs::metadata(dir).is_ok_and(|meta| meta.permissions().mode() & 0o022 != 0)
+}
+
 /// Resolve no primeiro SIGINT ou SIGTERM. Os tratadores entram já na chamada
 /// (dentro do runtime), não no primeiro poll.
 ///
@@ -205,6 +217,16 @@ mod tests {
         for leftover in [link, target, path] {
             std::fs::remove_file(leftover).unwrap();
         }
+    }
+
+    #[test]
+    fn a_dir_others_can_write_is_shared() {
+        assert!(in_shared_dir(Path::new("/tmp/semantic-cache.sock")));
+        let private = std::env::temp_dir().join(format!("scipc-{}-own", std::process::id()));
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!in_shared_dir(&private.join("s.sock")));
+        std::fs::remove_dir(private).unwrap();
     }
 
     /// Ignora o aviso de encerramento: só o prazo da drenagem o derruba.

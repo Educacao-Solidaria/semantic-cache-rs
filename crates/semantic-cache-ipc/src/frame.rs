@@ -2,14 +2,29 @@
 //! payload JSON e CRC32 IEEE sobre todos os bytes anteriores a ele.
 
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tracing::warn;
 
 pub const MAGIC: [u8; 4] = *b"SCIP";
 pub const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 16;
 /// Teto do payload (16 MiB): acima dele, `too_large` e a conexão fecha.
 pub const MAX_PAYLOAD: u32 = 16 << 20;
+/// O que se reserva para o payload antes de os bytes chegarem; acima disso, o
+/// buffer cresce com o que chega.
+const FIRST_RESERVE: u32 = 64 << 10;
+
+static DISCARDED: AtomicU64 = AtomicU64::new(0);
+
+/// Frames recusados pelo [`read_frame`] desde que o processo subiu: magic,
+/// versão, flags ou CRC errados, ou payload acima do teto. Um frame cortado
+/// pela queda do par não entra (não chegou inteiro para ser julgado).
+#[must_use]
+pub fn discarded_frames() -> u64 {
+    DISCARDED.load(Ordering::Relaxed)
+}
 
 /// Kinds do v1, como `u8`: um kind desconhecido chega íntegro ao despachante.
 pub mod kind {
@@ -101,12 +116,24 @@ pub fn encode(kind: u8, flags: u16, id: u32, payload: &[u8]) -> Result<Vec<u8>, 
     Ok(frame)
 }
 
-/// Lê o próximo frame; `Ok(None)` se o par fecha entre dois frames. O payload
-/// só é alocado depois de conferido o teto.
+/// Lê o próximo frame; `Ok(None)` se o par fecha entre dois frames. Nada é
+/// alocado antes de conferido o teto, e o payload ocupa só o que já chegou.
+/// Frame recusado conta em [`discarded_frames`] e vai para o log, sem o payload.
+/// Não é cancel-safe: cancelada no meio, o frame em curso se perde e o stream
+/// fica desalinhado; num `select!`, só quando cancelar = fechar a conexão.
 ///
 /// # Errors
 /// `BadFrame` e `TooLarge` pedem o [`FrameError::reply`] e o fechamento.
 pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>, FrameError> {
+    let read = read_checked(r).await;
+    if let Err(err @ (FrameError::BadFrame(..) | FrameError::TooLarge(..))) = &read {
+        DISCARDED.fetch_add(1, Ordering::Relaxed);
+        warn!(%err, "frame descartado");
+    }
+    read
+}
+
+async fn read_checked<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>, FrameError> {
     let mut head = [0; HEADER_LEN];
     if r.read(&mut head[..1]).await? == 0 {
         return Ok(None);
@@ -127,8 +154,11 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<Frame>
     if len > MAX_PAYLOAD {
         return Err(FrameError::TooLarge(request_id, len as usize));
     }
-    let mut payload = vec![0; len as usize];
-    r.read_exact(&mut payload).await?;
+    // Cresce com o que chega: um cabeçalho que promete 16 MiB e para de mandar
+    // não segura 16 MiB. Payload incompleto = o par fechou, e o `read_exact`
+    // do CRC abaixo dá `UnexpectedEof`.
+    let mut payload = Vec::with_capacity(len.min(FIRST_RESERVE) as usize);
+    (&mut *r).take(len.into()).read_to_end(&mut payload).await?;
     let mut crc = [0; 4];
     r.read_exact(&mut crc).await?;
     let mut hasher = crc32fast::Hasher::new();
