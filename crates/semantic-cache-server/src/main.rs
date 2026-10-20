@@ -69,6 +69,11 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let listener = semantic_cache_ipc::server::bind_pipe(&config.ipc.socket_path)?;
     let http = bind_http(config).await?;
     info!(path = %config.ipc.socket_path.display(), "ipc no ar");
+    #[cfg(unix)]
+    if semantic_cache_ipc::server::in_shared_dir(&config.ipc.socket_path) {
+        let hint = "em produção, use um diretório privado do serviço";
+        warn!(hint, "socket num diretório em que outros usuários escrevem");
+    }
     let (stop, stopping) = watch::channel(false);
     tokio::spawn(async move {
         signal.await;

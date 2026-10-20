@@ -23,7 +23,7 @@ mod unix;
 #[cfg(windows)]
 pub use pipe::{bind_pipe, shutdown_signal, PipeListener};
 #[cfg(unix)]
-pub use unix::{bind, bind_owned, shutdown_signal, SocketFile};
+pub use unix::{bind, bind_owned, in_shared_dir, shutdown_signal, SocketFile};
 
 /// Uma conexão: o socket Unix, o named pipe, `duplex` em teste.
 pub trait Conn: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
@@ -128,6 +128,7 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
 mod tests {
     use serde_json::{json, Value};
     use tokio::io::{duplex, AsyncReadExt};
+    use tokio::time::timeout;
 
     use super::*;
     use crate::frame::kind::*;
@@ -164,6 +165,54 @@ mod tests {
         assert_eq!(next(&mut client).await, (ERROR, 4, unsupported("0x55")));
         let (k, id, body) = next(&mut client).await;
         assert_eq!((k, id, &body["code"]), (ERROR, 5, &json!(code::BAD_FRAME)));
-        assert_eq!(client.read(&mut [0]).await.unwrap(), 0, "a conexão fecha");
+        // Com prazo: um servidor que não fecha travaria o teste em vez de falhar.
+        let closed = timeout(PATIENCE, client.read(&mut [0])).await.unwrap();
+        assert_eq!(closed.unwrap(), 0, "a conexão fecha");
+    }
+
+    /// Os frames de referência do contrato (`frame::tests`), já montados.
+    fn references() -> [Vec<u8>; 3] {
+        let lookup = r#"{"prompt":"olá","embedding":[0.5,-0.25],"threshold":0.75}"#.as_bytes();
+        let error = error_payload(code::BAD_REQUEST, "dimensão 2 ≠ 1536");
+        let frame = |k, id, payload: &[u8]| encode(k, 0, id, payload).unwrap();
+        [
+            frame(PING, 1, b""),
+            frame(LOOKUP_REQ, 7, lookup),
+            frame(ERROR, 7, &error),
+        ]
+    }
+
+    #[tokio::test]
+    async fn any_flipped_bit_gets_the_contract_error_and_the_connection_closes() {
+        for reference in references() {
+            for bit in 0..reference.len() * 8 {
+                let mut bad = reference.clone();
+                bad[bit / 8] ^= 1 << (bit % 8);
+                // Um PING bom logo atrás: o servidor não pode se ressincronizar nele.
+                bad.extend(encode(PING, 0, 99, b"").unwrap());
+                let (mut client, conn) = duplex(1 << 16);
+                let (_stop, stopping) = watch::channel(false);
+                tokio::spawn(async move { Basic.handle(conn, stopping).await });
+                client.write_all(&bad).await.unwrap();
+                client.shutdown().await.unwrap(); // tamanho que cresceu → EOF
+                let mut answer = Vec::new();
+                let read = timeout(PATIENCE, client.read_to_end(&mut answer)).await;
+                read.unwrap().unwrap();
+                let mut answer = answer.as_slice();
+                // Sem resposta, só com o tamanho alterado: o frame ficou truncado.
+                let Some(reply) = read_frame(&mut answer).await.unwrap() else {
+                    assert!((12..16).contains(&(bit / 8)), "bit {bit}: sem ERROR");
+                    continue;
+                };
+                let body: Value = serde_json::from_slice(&reply.payload).unwrap();
+                let code = body["code"].as_str();
+                assert_eq!(reply.kind, ERROR, "bit {bit}");
+                assert!(
+                    matches!(code, Some("bad_frame" | "too_large")),
+                    "bit {bit}: {body}"
+                );
+                assert_eq!(answer, b"", "bit {bit}: respondeu depois do ERROR");
+            }
+        }
     }
 }

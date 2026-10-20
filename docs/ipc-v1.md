@@ -34,6 +34,19 @@ mesmo framing.
 | `0x0F` | PONG | `{}` ou vazio |
 | `0x7F` | ERROR | `{"code": "bad_frame"\|"bad_request"\|"too_large"\|"overloaded"\|"unsupported"\|"internal", "message": str}` |
 
+**Segurança do socket (adendo de 20/10, só acrescenta — o fio não muda):** `/tmp` é de todos, e
+quem criar `/tmp/semantic-cache.sock` antes do cache recebe os prompts e pode devolver resposta falsa.
+- Servidor (Rust): o socket fica com permissão `0600` antes do primeiro `listen` (chmod entre `bind` e
+  `listen`: antes do `listen` o kernel recusa todo `connect`) e só remove na partida um caminho que seja
+  socket morto — nunca arquivo comum nem symlink (CACHRS 51/55).
+- Cliente (Go): antes de conectar, `Lstat` do caminho — tem de ser socket, não symlink, e o dono tem
+  de ser o uid esperado (padrão: o próprio uid do gateway; configurável para produção com usuários
+  separados). Não confere → não conecta e o cache vira miss, com log (GATEGO 69).
+- Produção: socket num diretório privado do serviço (ex.: `/run/semantic-cache/`, `0750`) pela config
+  dos dois lados; `/tmp/semantic-cache.sock` fica como padrão de desenvolvimento.
+- Windows: o servidor fala named pipe (CACHRS 61) e o cliente Go fala AF_UNIX — os dois só se
+  encontram no Windows se um dos lados ganhar o outro transporte; fora do escopo do v1.
+
 **Regras:**
 - Magic, versão ou CRC errados: o receptor manda ERROR `bad_frame` (se o cabeçalho foi lido) e
   **fecha a conexão** — não tenta ressincronizar o stream.

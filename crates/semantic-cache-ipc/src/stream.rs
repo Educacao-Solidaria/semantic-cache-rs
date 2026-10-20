@@ -141,6 +141,30 @@ mod tests {
         assert_eq!(collect(&mut client, 4).await, (Vec::new(), miss));
     }
 
+    /// Quantos frames `bytes` tem, ou o primeiro erro.
+    async fn read_all(mut bytes: &[u8]) -> Result<usize, FrameError> {
+        let mut frames = 0;
+        while read_frame(&mut bytes).await?.is_some() {
+            frames += 1;
+        }
+        Ok(frames)
+    }
+
+    #[tokio::test]
+    async fn every_frame_of_the_stream_carries_its_crc() {
+        let mut wire = Vec::new();
+        write_stream(&mut wire, 5, Some("olá ≠ mundo"), 0.5, 1, 4)
+            .await
+            .unwrap();
+        assert_eq!(read_all(&wire).await.unwrap(), 5, "4 chunks e o fim");
+        // Um bit trocado em qualquer frame (chunk ou fim) derruba a leitura.
+        for bit in 0..wire.len() * 8 {
+            let mut bad = wire.clone();
+            bad[bit / 8] ^= 1 << (bit % 8);
+            assert!(read_all(&bad).await.is_err(), "bit {bit} passou");
+        }
+    }
+
     #[tokio::test]
     async fn writer_waits_for_the_reader_and_stops_when_it_leaves() {
         // Buffer de 64 bytes: sem leitura, nem o primeiro frame inteiro cabe.
