@@ -140,6 +140,34 @@ jobs:
       - name: cargo test (NEON)
         run: cargo test --all-targets --locked
 
+  windows:
+    name: ipc (windows, named pipe)
+    # Runner Windows do GitHub (grátis em repositório público): o named pipe
+    # roda de verdade, em vez de só o clippy cruzado. Um comando por passo: no
+    # pwsh do Actions, só o código de saída do último comando conta.
+    runs-on: windows-latest
+    # Os testes têm prazo de 10 s; isto só corta um travamento do runner.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/semantic-cache-ipc -> target
+            crates/semantic-cache-server -> target
+      - name: clippy (ipc)
+        working-directory: crates/semantic-cache-ipc
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: cargo test (ipc)
+        working-directory: crates/semantic-cache-ipc
+        run: cargo test --all-targets --locked
+      - name: binário no named pipe
+        working-directory: crates/semantic-cache-server
+        run: cargo test --locked --test binary_test
+
   release:
     name: build release (LTO)
     runs-on: ubuntu-latest

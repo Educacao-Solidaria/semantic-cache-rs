@@ -1,7 +1,7 @@
 //! O binário de verdade, num processo filho: limpa o resto de uma queda no
 //! caminho do socket, atende PING, recusa uma segunda instância sem apagar o
-//! socket, e no SIGTERM sai com 0 e remove o socket que criou.
-#![cfg(unix)]
+//! socket, e no SIGTERM sai com 0 e remove o socket que criou. No Windows, o
+//! mesmo pelo named pipe, menos o sinal.
 
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use semantic_cache_ipc::frame::{encode, kind, read_frame};
 use tokio::io::AsyncWriteExt;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ClientOptions;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 const PATIENCE: Duration = Duration::from_secs(10); // folga para runner lento
@@ -44,11 +47,15 @@ impl Drop for Server {
     }
 }
 
-/// PING pelo socket, esperando o binário abri-lo.
+/// PING pelo socket (ou pelo pipe), esperando o binário abri-lo.
 async fn ping(socket: &Path, id: u32) {
     let started = Instant::now();
     let mut conn = loop {
-        match UnixStream::connect(socket).await {
+        #[cfg(unix)]
+        let opened = UnixStream::connect(socket).await;
+        #[cfg(windows)]
+        let opened = ClientOptions::new().open(socket);
+        match opened {
             Ok(conn) => break conn,
             Err(err) => assert!(started.elapsed() < PATIENCE, "socket fechado: {err}"),
         }
@@ -61,6 +68,7 @@ async fn ping(socket: &Path, id: u32) {
     assert_eq!((pong.kind, pong.request_id), (kind::PONG, id));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn binary_clears_a_dead_socket_refuses_a_twin_and_removes_its_own() {
     let socket = std::env::temp_dir().join(format!("scs-bin-{}.sock", std::process::id()));
@@ -79,4 +87,18 @@ async fn binary_clears_a_dead_socket_refuses_a_twin_and_removes_its_own() {
         .success());
     assert!(server.wait().success());
     assert!(!socket.exists(), "o socket ficou para trás");
+}
+
+/// O Ctrl+Break pede um console compartilhado, que o runner não garante: aqui o
+/// filho morre no `Drop`, e o encerramento limpo fica com o teste Unix.
+#[cfg(windows)]
+#[tokio::test]
+async fn binary_serves_the_named_pipe_and_refuses_a_twin() {
+    let pipe = format!(r"\\.\pipe\scs-bin-{}", std::process::id());
+    let pipe = Path::new(&pipe);
+    let _server = Server::start(pipe);
+    ping(pipe, 1).await;
+    let twin = Server::start(pipe).wait();
+    assert!(!twin.success(), "a segunda instância subiu");
+    ping(pipe, 2).await;
 }

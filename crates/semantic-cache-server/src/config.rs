@@ -26,7 +26,7 @@
 //! format = "json"
 //!
 //! [ipc]
-//! socket_path = "/tmp/semantic-cache.sock"
+//! socket_path = "/tmp/semantic-cache.sock"  # Windows: '\\.\pipe\semantic-cache'
 //! drain_timeout_ms = 5000
 //!
 //! [http]
@@ -225,7 +225,8 @@ impl FromStr for LogFormat {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IpcConfig {
-    /// Caminho do socket; o padrão é o do contrato (`docs/ipc-v1.md`).
+    /// Caminho do socket (no Windows, o nome do named pipe); o padrão é o do
+    /// contrato (`docs/ipc-v1.md`).
     pub socket_path: PathBuf,
     /// Quanto o encerramento espera pelas conexões antes de abortá-las, em ms.
     pub drain_timeout_ms: u64,
@@ -234,7 +235,11 @@ pub struct IpcConfig {
 impl Default for IpcConfig {
     fn default() -> Self {
         Self {
-            socket_path: PathBuf::from("/tmp/semantic-cache.sock"),
+            socket_path: PathBuf::from(if cfg!(windows) {
+                r"\\.\pipe\semantic-cache"
+            } else {
+                "/tmp/semantic-cache.sock"
+            }),
             drain_timeout_ms: 5000,
         }
     }
