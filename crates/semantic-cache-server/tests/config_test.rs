@@ -200,3 +200,23 @@ fn http_api_is_off_and_on_loopback_unless_configured() {
         );
     }
 }
+
+#[test]
+fn ipc_socket_defaults_to_the_contract_path() {
+    let ipc = Config::default().ipc;
+    assert_eq!(ipc.socket_path.to_str(), Some("/tmp/semantic-cache.sock"));
+    assert_eq!(ipc.drain_timeout(), Duration::from_secs(5));
+    let vars = [
+        ("SEMCACHE_IPC_SOCKET_PATH", "/run/sc.sock"),
+        ("SEMCACHE_IPC_DRAIN_TIMEOUT_MS", "0"),
+    ];
+    let ipc = Config::load_with(env(&vars)).unwrap().ipc;
+    assert_eq!(
+        (ipc.socket_path.to_str(), ipc.drain_timeout_ms),
+        (Some("/run/sc.sock"), 0)
+    );
+    let err = Config::from_toml("[ipc]\nsocket_path = \"\"\n")
+        .unwrap()
+        .validate();
+    assert!(matches!(err, Err(ConfigError::Invalid(_))));
+}

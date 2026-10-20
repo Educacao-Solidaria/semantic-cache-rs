@@ -2,8 +2,10 @@ use std::error::Error;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use axum::Router;
 use semantic_cache_server::persistence::SledStore;
 use semantic_cache_server::{alloc, build_info, config::Config, http, logging};
+use tokio::net::TcpListener;
 use tracing::{error, info, info_span, warn, Instrument};
 
 #[tokio::main]
@@ -42,41 +44,89 @@ async fn main() -> ExitCode {
     }
     .instrument(info_span!("startup"))
     .await;
-    if !config.http.enabled {
-        return ExitCode::SUCCESS;
+    match run(&config).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            error!(%err, "servidor encerrado com erro");
+            ExitCode::FAILURE
+        }
     }
-    if let Err(err) = serve_http(&config).await {
-        error!(%err, "api http de depuração");
-        return ExitCode::FAILURE;
-    }
-    ExitCode::SUCCESS
 }
 
-/// Sobe a API HTTP de depuração até SIGINT/SIGTERM. O socket IPC entra no
-/// binário no PR 55/100.
-async fn serve_http(config: &Config) -> Result<(), Box<dyn Error>> {
+/// Sobe o socket IPC e, se ligada, a API HTTP, que param no mesmo SIGINT ou
+/// SIGTERM. O socket criado sai no fim, por qualquer caminho (guarda no `Drop`).
+#[cfg(unix)]
+async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
+    use semantic_cache_ipc::server::{bind_owned, serve, shutdown_signal, Basic};
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    // O tratador entra antes dos binds: um SIGTERM na partida encerra limpo.
+    let signal = shutdown_signal()?;
+    let (listener, _socket) = bind_owned(&config.ipc.socket_path)?;
+    let http = bind_http(config).await?;
+    info!(path = %config.ipc.socket_path.display(), "ipc no ar");
+    let (stop, stopping) = watch::channel(false);
+    tokio::spawn(async move {
+        signal.await;
+        stop.send_replace(true);
+    });
+    let stopped = |mut rx: watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|&s| s).await;
+    };
+    let drain = config.ipc.drain_timeout();
+    let ipc = serve(listener, Basic, stopped(stopping.clone()), drain);
+    let http = async {
+        let Some((listener, app)) = http else {
+            return Ok(());
+        };
+        let graceful = axum::serve(listener, app).with_graceful_shutdown(stopped(stopping.clone()));
+        graceful.await
+    };
+    // O IPC aborta as conexões no prazo; o axum não tem prazo de drenagem, então
+    // depois do sinal o processo sai em `drain` + 1 s com o que estiver aberto.
+    let deadline = async {
+        stopped(stopping.clone()).await;
+        tokio::time::sleep(drain + Duration::from_secs(1)).await;
+    };
+    tokio::select! {
+        ((), served) = async { tokio::join!(ipc, http) } => served?,
+        () = deadline => warn!("encerramento passou do prazo; saindo com conexões abertas"),
+    }
+    Ok(())
+}
+
+/// No Windows ainda não há IPC (named pipes no PR 61/100): só a API HTTP, se
+/// ligada, até o Ctrl+C.
+#[cfg(not(unix))]
+async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
+    if let Some((listener, app)) = bind_http(config).await? {
+        let ctrl_c = async { drop(tokio::signal::ctrl_c().await) };
+        axum::serve(listener, app)
+            .with_graceful_shutdown(ctrl_c)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Abre a porta da API HTTP de depuração, se ligada, já com as rotas.
+///
+/// ponytail: sem prazo para cabeçalho lento (o `axum::serve` não expõe); o
+/// upgrade é `hyper-util` com `header_read_timeout`.
+async fn bind_http(config: &Config) -> Result<Option<(TcpListener, Router)>, Box<dyn Error>> {
+    if !config.http.enabled {
+        return Ok(None);
+    }
     let store = match &config.persistence.path {
         Some(path) => Some(Arc::new(SledStore::open(path, &config.persistence)?)),
         None => None,
     };
-    // SIGINT/SIGTERM no Unix; no Windows (sem o `server` do IPC até o PR
-    // 61/100), o Ctrl+C.
-    #[cfg(unix)]
-    let shutdown = semantic_cache_ipc::server::shutdown_signal()?;
-    #[cfg(not(unix))]
-    let shutdown = async { drop(tokio::signal::ctrl_c().await) };
-    let listener = tokio::net::TcpListener::bind(config.http.listen).await?;
+    let listener = TcpListener::bind(config.http.listen).await?;
     let addr = listener.local_addr()?;
     if !addr.ip().is_loopback() {
         warn!(%addr, "api de depuração fora do loopback: expõe o conteúdo do cache");
     }
     info!(%addr, "api http de depuração no ar");
     let app = http::with_limits(http::routes(store), &config.http);
-    // ponytail: sem prazo para cabeçalho lento nem para a drenagem (o
-    // `axum::serve` não os expõe); upgrade: `hyper-util` com
-    // `header_read_timeout`, junto com o ciclo de vida do PR 55/100.
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
-    Ok(())
+    Ok(Some((listener, app)))
 }
