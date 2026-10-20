@@ -184,3 +184,52 @@ jobs:
         run: cargo build --release --locked
       - name: binário sai do profile release
         run: ./target/release/semantic-cache-server --version | grep -F '(release,'
+
+  e2e:
+    name: e2e (rust ⇄ go)
+    # O cliente do gateway (flow-gateway-go, público) contra os binários daqui.
+    # O teste Go (crates/semantic-cache-testkit/gateway-e2e/) entra no checkout:
+    # `internal/` só se importa de dentro do módulo.
+    runs-on: ubuntu-latest
+    # Cada espera do teste tem prazo de 10 s; isto só corta um travamento do runner.
+    timeout-minutes: 20
+    # Roda código de outro repositório: token só de leitura.
+    permissions:
+      contents: read
+    env:
+      # main do flow-gateway-go com o cliente UDS; fixada para o job só mudar
+      # quando este sha mudar.
+      GATEWAY_SHA: 9e51bc213b077002240744a9ca52f81477bc7d22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Educacao-Solidaria/flow-gateway-go
+          ref: ${{ env.GATEWAY_SHA }}
+          path: gateway
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache-dependency-path: gateway/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/semantic-cache-server -> target
+            crates/semantic-cache-testkit -> target
+      - name: binários Rust
+        run: |
+          cargo build --locked --manifest-path crates/semantic-cache-server/Cargo.toml
+          cargo build --locked --manifest-path crates/semantic-cache-testkit/Cargo.toml --bin reference-server
+      - name: cliente Go contra os binários
+        working-directory: gateway
+        env:
+          SEMCACHE_E2E_SERVER: ${{ github.workspace }}/crates/semantic-cache-server/target/debug/semantic-cache-server
+          SEMCACHE_E2E_REFERENCE: ${{ github.workspace }}/crates/semantic-cache-testkit/target/debug/reference-server
+        run: |
+          mkdir internal/e2erust
+          cp ../crates/semantic-cache-testkit/gateway-e2e/e2e_test.go internal/e2erust/
+          test -z "$(gofmt -l internal/e2erust | tee /dev/stderr)"
+          go vet ./internal/e2erust/
+          go test -race -count=1 -v ./internal/e2erust/

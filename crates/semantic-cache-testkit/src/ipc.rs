@@ -1,11 +1,15 @@
 //! Servidor de referência do IPC v1 (`docs/ipc-v1.md`) para medir e testar o
 //! caminho inteiro: o `serve` e o codec de produção (`semantic_cache_ipc`)
-//! com um handler que responde LOOKUP pela busca SIMD de um [`VectorIndex`].
+//! com um handler que responde LOOKUP pela busca SIMD de um [`VectorIndex`],
+//! guarda com STORE e conta com STATS.
 //!
 //! O despacho de produção é o PR 52/100 (Luan); até ele chegar, o binário do
-//! servidor só responde PING e STATS, e quem mede o LOOKUP de ponta a ponta
-//! (o bench `ipc`) usa este handler.
+//! servidor só responde PING e STATS, e quem fala LOOKUP/STORE de ponta a ponta
+//! (o bench `ipc`, o teste de carga e o e2e com o gateway Go, pelo binário
+//! `reference-server`) usa este handler.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{PoisonError, RwLock};
 use std::time::Instant;
 
 use semantic_cache_ipc::frame::{code, encode, error_payload, kind, read_frame, Frame};
@@ -33,18 +37,45 @@ pub struct LookupResp {
     pub latency_micros: i64,
 }
 
-/// Cache só de leitura: o índice e o texto guardado para cada id dele. Um
-/// pedido por vez em cada conexão, na ordem em que chegam (o pipeline do
-/// cliente vale); as conexões correm em paralelo nos workers do runtime.
+/// Payload do `STORE_REQ`. ponytail: `prompt` e `ttl_seconds` são ignorados
+/// (a busca é pelo embedding, e a entrada nunca expira); o TTL é do store de
+/// produção (PR 52/100).
+#[derive(Deserialize)]
+struct StoreReq {
+    response: String,
+    embedding: Vec<f32>,
+}
+
+/// Payload do `STATS_RESP` (o `cache.StatsResult` do gateway).
+#[derive(Serialize)]
+struct StatsResp {
+    total_entries: u64,
+    hit_count: u64,
+    miss_count: u64,
+    hit_ratio: f32,
+}
+
+/// Cache em memória: o índice e o texto guardado para cada id dele, atrás de
+/// um `RwLock` (LOOKUP lê, STORE escreve). Um pedido por vez em cada conexão,
+/// na ordem em que chegam (o pipeline do cliente vale); as conexões correm em
+/// paralelo nos workers do runtime.
 ///
 /// ponytail: a busca roda no worker do tokio e o segura enquanto varre; com
 /// índice grande e muitas conexões, o upgrade é `spawn_blocking` ou um pool
-/// próprio para a varredura.
+/// próprio para a varredura. Sem teto de entradas: é ferramental de teste.
 #[derive(Debug)]
 pub struct SearchCache<I> {
-    index: I,
+    entries: RwLock<Entries<I>>,
     dim: usize,
-    responses: Vec<String>,
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
+/// O índice e o texto de cada id dele (`None` = vetor sem texto).
+#[derive(Debug)]
+struct Entries<I> {
+    index: I,
+    responses: Vec<Option<String>>,
 }
 
 impl<I: VectorIndex> SearchCache<I> {
@@ -52,10 +83,12 @@ impl<I: VectorIndex> SearchCache<I> {
     /// `dim`. Vetor sem texto nunca dá hit.
     #[must_use]
     pub fn new(index: I, dim: usize, responses: Vec<String>) -> Self {
+        let responses = responses.into_iter().map(Some).collect();
         Self {
-            index,
+            entries: RwLock::new(Entries { index, responses }),
             dim,
-            responses,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
@@ -69,6 +102,11 @@ impl<I: VectorIndex> SearchCache<I> {
                 Ok(resp) => encode(kind::LOOKUP_RESP, 0, id, &resp),
                 Err(message) => error(code::BAD_REQUEST, &message),
             },
+            kind::STORE_REQ => match self.store(&frame.payload) {
+                Ok(()) => encode(kind::STORE_RESP, 0, id, b"{}"),
+                Err(message) => error(code::BAD_REQUEST, &message),
+            },
+            kind::STATS_REQ => encode(kind::STATS_RESP, 0, id, &self.stats()),
             other => error(
                 code::UNSUPPORTED,
                 &format!("kind 0x{other:02x} não suportado"),
@@ -86,21 +124,71 @@ impl<I: VectorIndex> SearchCache<I> {
         let started = Instant::now();
         let req: LookupReq =
             serde_json::from_slice(payload).map_err(|_| "LOOKUP_REQ ilegível".to_owned())?;
-        if req.embedding.len() != self.dim {
-            return Err(format!("dimensão {} ≠ {}", req.embedding.len(), self.dim));
-        }
-        let query = unit(&req.embedding).ok_or("embedding não finito ou de norma zero")?;
-        let best = self.index.search(&query, 1).first().copied();
+        let query = self.checked(&req.embedding)?;
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let best = entries.index.search(&query, 1).first().copied();
         let cached = best
             .filter(|b| b.score >= req.threshold)
-            .and_then(|b| self.responses.get(b.id));
+            .and_then(|b| entries.responses.get(b.id).cloned().flatten());
+        drop(entries);
+        let counter = if cached.is_some() {
+            &self.hits
+        } else {
+            &self.misses
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
         let resp = LookupResp {
             hit: cached.is_some(),
             score: best.map_or(0.0, |b| b.score),
-            cached_response: cached.cloned(),
+            cached_response: cached,
             latency_micros: i64::try_from(started.elapsed().as_micros()).unwrap_or(i64::MAX),
         };
         Ok(serde_json::to_vec(&resp).expect("struct sem mapa sempre serializa"))
+    }
+
+    /// `embedding` na dimensão do índice, com norma 1 (ver [`unit`]).
+    fn checked(&self, embedding: &[f32]) -> Result<Vec<f32>, String> {
+        if embedding.len() != self.dim {
+            return Err(format!("dimensão {} ≠ {}", embedding.len(), self.dim));
+        }
+        unit(embedding).ok_or_else(|| "embedding não finito ou de norma zero".to_owned())
+    }
+
+    /// Guarda o texto com o próximo id do índice; a mensagem de erro não leva
+    /// o texto nem o embedding (contrato).
+    fn store(&self, payload: &[u8]) -> Result<(), String> {
+        let req: StoreReq =
+            serde_json::from_slice(payload).map_err(|_| "STORE_REQ ilegível".to_owned())?;
+        let vector = self.checked(&req.embedding)?;
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let id = entries.index.len();
+        entries.index.insert(&vector);
+        if entries.responses.len() <= id {
+            entries.responses.resize(id + 1, None);
+        }
+        entries.responses[id] = Some(req.response);
+        Ok(())
+    }
+
+    /// Entradas no índice e os LOOKUP respondidos (pedido recusado não conta).
+    fn stats(&self) -> Vec<u8> {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let total_entries = u64::try_from(entries.index.len()).unwrap_or(u64::MAX);
+        drop(entries);
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)] // razão em [0, 1]
+        let hit_ratio = match hits + misses {
+            0 => 0.0,
+            all => (hits as f64 / all as f64) as f32,
+        };
+        let stats = StatsResp {
+            total_entries,
+            hit_count: hits,
+            miss_count: misses,
+            hit_ratio,
+        };
+        serde_json::to_vec(&stats).expect("struct sem mapa sempre serializa")
     }
 }
 
@@ -141,7 +229,7 @@ mod tests {
     use std::time::Duration;
 
     use semantic_cache_ipc::frame::kind::*;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::sync::watch;
     use tokio::time::timeout;
@@ -204,7 +292,7 @@ mod tests {
             lookup(4, "[0,0,0,0]"),
             lookup(5, "[1e39,0,0,0]"),
             encode(LOOKUP_REQ, 0, 6, br#"{"prompt":"#).unwrap(),
-            encode(STORE_REQ, 0, 7, b"{}").unwrap(),
+            encode(LOOKUP_STREAM_REQ, 0, 7, b"{}").unwrap(),
             encode(PING, 0, 8, b"").unwrap(),
             lookup(9, "[0,0,2,0]"),
             lookup(10, "[1e-45,0,0,0]"),
@@ -266,6 +354,39 @@ mod tests {
     #[tokio::test]
     async fn flat_i8_answers_in_order_and_rejects_bad_requests() {
         answers_in_order_and_rejects_bad_requests::<FlatI8>().await;
+    }
+
+    /// STORE guarda com o próximo id do índice (o 3, depois dos eixos de
+    /// `cache`; o id 2 segue sem texto), e STATS conta o que o LOOKUP respondeu.
+    #[tokio::test]
+    async fn store_then_lookup_and_stats() {
+        let store = |id, embedding: &str| {
+            let body = format!(r#"{{"prompt":"p","response":"novo","embedding":{embedding}}}"#);
+            encode(STORE_REQ, 0, id, body.as_bytes()).unwrap()
+        };
+        let batch = [
+            store(1, "[0,0,0,2]"),
+            lookup(2, "[0,0,0,1]"),
+            lookup(3, "[0,0,1,0]"),
+            store(4, "[0,0,1]"),
+            store(5, "[0,0,0,0]"),
+            encode(STORE_REQ, 0, 6, br#"{"prompt":"p"}"#).unwrap(),
+            encode(STATS_REQ, 0, 7, b"{}").unwrap(),
+        ];
+        let replies = exchange(cache::<FlatI8>(), &batch.concat()).await;
+        let body = |i: usize| &replies[i].2;
+        let kinds: Vec<u8> = replies.iter().map(|r| r.0).collect();
+        let want = [STORE_RESP, LOOKUP_RESP, LOOKUP_RESP, ERROR, ERROR, ERROR];
+        assert_eq!(kinds, [&want[..], &[STATS_RESP]].concat());
+        assert_eq!(*body(0), json!({}));
+        assert_eq!(body(1)["cached_response"], "novo");
+        assert_eq!(body(2)["hit"], false);
+        assert_eq!(body(2)["score"], 1.0);
+        for i in 3..6 {
+            assert_eq!(body(i)["code"], "bad_request", "pedido {}", i + 1);
+        }
+        let stats = json!({"total_entries": 4, "hit_count": 1, "miss_count": 1, "hit_ratio": 0.5});
+        assert_eq!(*body(6), stats);
     }
 
     #[tokio::test]
