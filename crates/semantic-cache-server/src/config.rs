@@ -28,6 +28,8 @@
 //! [ipc]
 //! socket_path = "/tmp/semantic-cache.sock"  # Windows: '\\.\pipe\semantic-cache'
 //! drain_timeout_ms = 5000
+//! max_connections = 256
+//! idle_timeout_ms = 300000
 //!
 //! [http]
 //! enabled = true
@@ -41,6 +43,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use semantic_cache_ipc::server::Limits;
 use serde::Deserialize;
 
 /// Variável com o caminho do arquivo TOML.
@@ -230,6 +233,10 @@ pub struct IpcConfig {
     pub socket_path: PathBuf,
     /// Quanto o encerramento espera pelas conexões antes de abortá-las, em ms.
     pub drain_timeout_ms: u64,
+    /// Conexões atendidas ao mesmo tempo; a seguinte recebe `overloaded`.
+    pub max_connections: usize,
+    /// Conexão que não manda nem lê por este tempo fecha, em ms; 0 = sem prazo.
+    pub idle_timeout_ms: u64,
 }
 
 impl Default for IpcConfig {
@@ -241,6 +248,8 @@ impl Default for IpcConfig {
                 "/tmp/semantic-cache.sock"
             }),
             drain_timeout_ms: 5000,
+            max_connections: 256,
+            idle_timeout_ms: 300_000,
         }
     }
 }
@@ -249,6 +258,16 @@ impl IpcConfig {
     #[must_use]
     pub fn drain_timeout(&self) -> Duration {
         Duration::from_millis(self.drain_timeout_ms)
+    }
+
+    /// Os tetos do `serve` do IPC.
+    #[must_use]
+    pub fn limits(&self) -> Limits {
+        Limits {
+            max_connections: self.max_connections,
+            idle: Duration::from_millis(self.idle_timeout_ms),
+            drain: self.drain_timeout(),
+        }
     }
 }
 
@@ -382,6 +401,9 @@ impl Config {
             "SEMCACHE_IPC_DRAIN_TIMEOUT_MS",
             &mut ipc.drain_timeout_ms,
         )?;
+        let (max, idle) = (&mut ipc.max_connections, &mut ipc.idle_timeout_ms);
+        override_from(env, "SEMCACHE_IPC_MAX_CONNECTIONS", max)?;
+        override_from(env, "SEMCACHE_IPC_IDLE_TIMEOUT_MS", idle)?;
         let http = &mut self.http;
         override_from(env, "SEMCACHE_HTTP_ENABLED", &mut http.enabled)?;
         override_from(env, "SEMCACHE_HTTP_LISTEN", &mut http.listen)?;
@@ -397,8 +419,8 @@ impl Config {
     /// # Errors
     /// Capacidade ou TTL zerados, threshold fora de `(0, 1]`, orçamento de
     /// memória inválido ([`MemoryConfig::validate`]), caminho de persistência
-    /// ou socket IPC vazios, intervalo de flush zero, ou teto de corpo ou prazo
-    /// HTTP zero.
+    /// ou socket IPC vazios, teto de conexões IPC ou intervalo de flush zero, ou
+    /// teto de corpo ou prazo HTTP zero.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cache.max_capacity == 0 {
             return Err(ConfigError::Invalid("cache.max_capacity deve ser > 0"));
@@ -427,6 +449,9 @@ impl Config {
         }
         if self.ipc.socket_path.as_os_str().is_empty() {
             return Err(ConfigError::Invalid("ipc.socket_path vazio"));
+        }
+        if self.ipc.max_connections == 0 {
+            return Err(ConfigError::Invalid("ipc.max_connections deve ser > 0"));
         }
         if self.http.max_body_bytes == 0 || self.http.timeout_ms == 0 {
             return Err(ConfigError::Invalid(

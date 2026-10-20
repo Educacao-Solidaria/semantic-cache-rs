@@ -5,12 +5,15 @@
 
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::sync::watch;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
+use tokio::time::Sleep;
 use tracing::warn;
 
 use crate::frame::{code, encode, error_payload, kind, read_frame, FrameError};
@@ -46,15 +49,35 @@ pub trait Handler: Send + Sync + 'static {
     fn handle<S: Conn>(&self, conn: S, stop: Stop) -> impl Future<Output = ()> + Send;
 }
 
+/// Tetos do [`serve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Conexões atendidas ao mesmo tempo. A seguinte recebe ERROR `overloaded`
+    /// com `request_id` 0 e é fechada (contrato).
+    pub max_connections: usize,
+    /// Leitura ou escrita parada (o par não manda nem lê) por este tempo
+    /// falha com `TimedOut`, e o handler fecha; `Duration::ZERO` = sem prazo.
+    pub idle: Duration,
+    /// Quanto o encerramento espera pelas conexões antes de abortá-las.
+    pub drain: Duration,
+}
+
+/// O ERROR `overloaded` não espera mais que isto por um par que não lê.
+const REFUSAL_DEADLINE: Duration = Duration::from_secs(1);
+
 /// Aceita conexões até `shutdown` resolver; aí para de aceitar, avisa as
-/// conexões e espera até `drain` por elas, abortando as que passarem do prazo.
+/// conexões e espera até `limits.drain` por elas, abortando as que passarem
+/// do prazo. Cada conexão ocupa uma das `limits.max_connections` vagas até
+/// cair, por qualquer motivo: fim, erro, prazo, pânico ou aborto.
 pub async fn serve<L: Listener, H: Handler>(
     mut listener: L,
     handler: H,
     shutdown: impl Future,
-    drain: Duration,
+    limits: Limits,
 ) {
     let handler = Arc::new(handler);
+    let slots = limits.max_connections.min(Semaphore::MAX_PERMITS);
+    let slots = Arc::new(Semaphore::new(slots));
     let (stop, stopping) = watch::channel(false);
     let mut conns = JoinSet::new();
     tokio::pin!(shutdown);
@@ -63,8 +86,18 @@ pub async fn serve<L: Listener, H: Handler>(
             _ = &mut shutdown => break,
             accepted = listener.accept() => match accepted {
                 Ok(conn) => {
+                    let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+                        warn!(max = limits.max_connections, "limite de conexões; recusando");
+                        conns.spawn(refuse(conn));
+                        continue;
+                    };
                     let (handler, stopping) = (Arc::clone(&handler), stopping.clone());
-                    conns.spawn(async move { handler.handle(conn, stopping).await });
+                    let conn = Idle::new(conn, limits.idle);
+                    // A vaga vai com a task: volta no fim dela ou no drop (pânico, aborto).
+                    conns.spawn(async move {
+                        handler.handle(conn, stopping).await;
+                        drop(slot);
+                    });
                 }
                 // Ex.: EMFILE. A pausa evita girar em falso sem descritor.
                 Err(err) => {
@@ -79,9 +112,101 @@ pub async fn serve<L: Listener, H: Handler>(
     drop(listener);
     stop.send_replace(true);
     let all_done = async { while conns.join_next().await.is_some() {} };
-    if tokio::time::timeout(drain, all_done).await.is_err() {
+    if tokio::time::timeout(limits.drain, all_done).await.is_err() {
         warn!(left = conns.len(), "prazo de drenagem esgotado; abortando");
         conns.shutdown().await;
+    }
+}
+
+/// Conexão acima do teto: ERROR `overloaded` com `request_id` 0, e fecha.
+async fn refuse<S: Conn>(mut conn: S) {
+    let payload = error_payload(code::OVERLOADED, "limite de conexões atingido");
+    if let Ok(frame) = encode(kind::ERROR, 0, 0, &payload) {
+        let _ = tokio::time::timeout(REFUSAL_DEADLINE, conn.write_all(&frame)).await;
+    }
+}
+
+/// A conexão que o handler recebe, com o prazo de ociosidade: uma leitura (ou
+/// escrita) que espera o par por `idle` sem andar falha com `TimedOut`. O
+/// prazo só corre enquanto ela espera, então processar devagar não conta.
+///
+/// ponytail: quem manda 1 byte a cada `idle` segura a vaga; o upgrade é um
+/// prazo por frame no despachante.
+struct Idle<S> {
+    conn: S,
+    limit: Duration,
+    reading: Option<Pin<Box<Sleep>>>,
+    writing: Option<Pin<Box<Sleep>>>,
+}
+
+impl<S> Idle<S> {
+    fn new(conn: S, limit: Duration) -> Self {
+        Self {
+            conn,
+            limit,
+            reading: None,
+            writing: None,
+        }
+    }
+}
+
+/// `Pending` enquanto a espera cabe no prazo (o relógio começa na 1ª espera);
+/// vencido, `TimedOut`.
+fn waited<T>(
+    timer: &mut Option<Pin<Box<Sleep>>>,
+    idle: Duration,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<T>> {
+    if idle.is_zero() {
+        return Poll::Pending;
+    }
+    let timer = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(idle)));
+    ready!(timer.as_mut().poll(cx));
+    Poll::Ready(Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "conexão ociosa",
+    )))
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Idle<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.conn).poll_read(cx, buf) {
+            Poll::Pending => waited(&mut this.reading, this.limit, cx),
+            done @ Poll::Ready(_) => {
+                this.reading = None;
+                done
+            }
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Idle<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.conn).poll_write(cx, buf) {
+            Poll::Pending => waited(&mut this.writing, this.limit, cx),
+            done @ Poll::Ready(_) => {
+                this.writing = None;
+                done
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().conn).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().conn).poll_shutdown(cx)
     }
 }
 
@@ -126,14 +251,27 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use serde_json::{json, Value};
-    use tokio::io::{duplex, AsyncReadExt};
+    use tokio::io::{duplex, AsyncReadExt, DuplexStream};
+    use tokio::sync::mpsc;
     use tokio::time::timeout;
 
     use super::*;
     use crate::frame::kind::*;
 
     pub(super) const PATIENCE: Duration = Duration::from_secs(10); // folga para runner lento
+
+    /// Os `Limits` dos testes que não medem os tetos.
+    pub(super) fn limits(drain: Duration) -> Limits {
+        let (max_connections, idle) = (64, Duration::ZERO);
+        Limits {
+            max_connections,
+            idle,
+            drain,
+        }
+    }
 
     /// `(kind, request_id, payload em JSON)`; payload vazio vira `null`.
     pub(super) async fn next(conn: &mut impl Conn) -> (u8, u32, Value) {
@@ -214,5 +352,145 @@ mod tests {
                 assert_eq!(answer, b"", "bit {bit}: respondeu depois do ERROR");
             }
         }
+    }
+
+    /// Listener de teste: cada `DuplexStream` mandado no canal é uma conexão.
+    impl Listener for mpsc::Receiver<DuplexStream> {
+        type Conn = DuplexStream;
+
+        async fn accept(&mut self) -> io::Result<DuplexStream> {
+            match self.recv().await {
+                Some(conn) => Ok(conn),
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    async fn dial(listener: &mpsc::Sender<DuplexStream>) -> DuplexStream {
+        let (client, server) = duplex(1 << 16);
+        listener.send(server).await.unwrap();
+        client
+    }
+
+    async fn ping(conn: &mut DuplexStream, id: u32) -> (u8, u32, Value) {
+        let ping = encode(PING, 0, id, b"").unwrap();
+        conn.write_all(&ping).await.unwrap();
+        next(conn).await
+    }
+
+    /// Uma conexão atendida, tentando de novo enquanto a vaga não volta.
+    async fn served(listener: &mpsc::Sender<DuplexStream>) -> DuplexStream {
+        let started = Instant::now();
+        loop {
+            let mut conn = dial(listener).await;
+            let ping = encode(PING, 0, 7, b"").unwrap();
+            let _ = conn.write_all(&ping).await; // a recusada pode já ter fechado
+            match next(&mut conn).await {
+                (PONG, 7, _) => return conn,
+                (ERROR, 0, body) if body["code"] == code::OVERLOADED => {}
+                other => panic!("resposta inesperada: {other:?}"),
+            }
+            assert!(started.elapsed() < PATIENCE, "a vaga não voltou");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// PONG a cada PING; outro kind derruba a task.
+    struct Fragile;
+
+    impl Handler for Fragile {
+        async fn handle<S: Conn>(&self, mut conn: S, _stop: Stop) {
+            while let Ok(Some(frame)) = read_frame(&mut conn).await {
+                assert_eq!(frame.kind, PING, "pânico de propósito");
+                let pong = encode(PONG, 0, frame.request_id, b"").unwrap();
+                conn.write_all(&pong).await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn over_the_limit_is_refused_and_every_way_out_gives_the_slot_back() {
+        let (listener, accept) = mpsc::channel(8);
+        let (max_connections, idle, drain) = (2, Duration::ZERO, Duration::ZERO);
+        let limits = Limits {
+            max_connections,
+            idle,
+            drain,
+        };
+        tokio::spawn(serve(accept, Fragile, std::future::pending::<()>(), limits));
+        let (mut a, mut b) = (dial(&listener).await, dial(&listener).await);
+        assert_eq!(ping(&mut a, 1).await, (PONG, 1, Value::Null));
+        assert_eq!(ping(&mut b, 2).await, (PONG, 2, Value::Null));
+        // A terceira (N+1): ERROR overloaded com request_id 0, e fecha.
+        let refused = |mut conn: DuplexStream| async move {
+            let reply = timeout(PATIENCE, next(&mut conn)).await;
+            let (k, id, body) = reply.expect("a conexão N+1 foi aceita");
+            assert_eq!((k, id, &body["code"]), (ERROR, 0, &json!(code::OVERLOADED)));
+            assert_eq!(conn.read(&mut [0]).await.unwrap(), 0, "a recusada fecha");
+        };
+        refused(dial(&listener).await).await;
+        // Pânico no handler: a vaga volta.
+        a.write_all(&encode(STATS_REQ, 0, 3, b"").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(a.read(&mut [0]).await.unwrap(), 0, "a task caiu");
+        let c = served(&listener).await;
+        // O par que fecha: a vaga volta.
+        drop(b);
+        let d = served(&listener).await;
+        // E só essas: com c e d no ar, a próxima é recusada de novo.
+        refused(dial(&listener).await).await;
+        drop((c, d));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_peer_is_closed_at_the_idle_deadline_and_frees_its_slot() {
+        let (listener, accept) = mpsc::channel(8);
+        let (max_connections, idle, drain) = (1, Duration::from_secs(30), Duration::ZERO);
+        let limits = Limits {
+            max_connections,
+            idle,
+            drain,
+        };
+        tokio::spawn(serve(accept, Basic, std::future::pending::<()>(), limits));
+        let mut conn = dial(&listener).await;
+        // Atividade adia o prazo: um PING a cada 20 s, por 1 min.
+        for id in 1..=3 {
+            assert_eq!(ping(&mut conn, id).await.0, PONG);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        }
+        // Calado: fecha 30 s depois do último PONG, 10 s a partir daqui.
+        let started = tokio::time::Instant::now();
+        let closed = timeout(Duration::from_secs(60), conn.read(&mut [0])).await;
+        assert_eq!(closed.expect("sem prazo de ociosidade").unwrap(), 0);
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_secs(10) && waited < Duration::from_secs(11));
+        drop((conn, served(&listener).await));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_stops_reading_is_closed_at_the_idle_deadline() {
+        let (listener, accept) = mpsc::channel(8);
+        let (max_connections, idle, drain) = (1, Duration::from_secs(30), Duration::ZERO);
+        let limits = Limits {
+            max_connections,
+            idle,
+            drain,
+        };
+        tokio::spawn(serve(accept, Basic, std::future::pending::<()>(), limits));
+        // Buffer de 64 bytes e PINGs sem ler as PONGs: a escrita do servidor para.
+        let (mut client, server) = duplex(64);
+        listener.send(server).await.unwrap();
+        let pings: Vec<u8> = (0..64)
+            .flat_map(|id| encode(PING, 0, id, b"").unwrap())
+            .collect();
+        let started = tokio::time::Instant::now();
+        let sent = timeout(Duration::from_secs(60), client.write_all(&pings)).await;
+        assert!(
+            sent.expect("sem prazo na escrita").is_err(),
+            "o servidor fechou"
+        );
+        assert!(started.elapsed() >= Duration::from_secs(30));
+        drop((client, served(&listener).await));
     }
 }

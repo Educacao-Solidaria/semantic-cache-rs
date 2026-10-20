@@ -24,6 +24,10 @@ thiserror = "1.0"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
 
+[dev-dependencies]
+# Relógio pausado (`start_paused`) nos testes de ociosidade: sem esperar de verdade.
+tokio = { version = "1", features = ["test-util"] }
+
 # DACL do named pipe (só o dono); já vem no lock pelo tokio.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Authorization"] }

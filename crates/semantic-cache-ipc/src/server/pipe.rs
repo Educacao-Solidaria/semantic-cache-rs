@@ -126,7 +126,7 @@ mod tests {
 
     use super::*;
     use crate::frame::{encode, kind::*};
-    use crate::server::tests::{next, PATIENCE};
+    use crate::server::tests::{limits, next, PATIENCE};
     use crate::server::{serve, Basic};
 
     fn pipe(tag: &str) -> String {
@@ -152,7 +152,8 @@ mod tests {
         let twin = bind_pipe(&name).unwrap_err();
         assert_eq!(twin.kind(), io::ErrorKind::AddrInUse);
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(serve(listener, Basic, stopped, Duration::from_secs(60)));
+        let patient = limits(Duration::from_secs(60));
+        let server = tokio::spawn(serve(listener, Basic, stopped, patient));
         // Duas conexões abertas ao mesmo tempo: cada accept deixa outra instância.
         let (mut a, mut b) = (open(&name).await, open(&name).await);
         for (conn, id) in [(&mut a, 1), (&mut b, 2)] {

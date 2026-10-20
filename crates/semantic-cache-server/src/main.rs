@@ -82,8 +82,8 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let stopped = |mut rx: watch::Receiver<bool>| async move {
         let _ = rx.wait_for(|&s| s).await;
     };
-    let drain = config.ipc.drain_timeout();
-    let ipc = serve(listener, Basic, stopped(stopping.clone()), drain);
+    let (drain, limits) = (config.ipc.drain_timeout(), config.ipc.limits());
+    let ipc = serve(listener, Basic, stopped(stopping.clone()), limits);
     let http = async {
         let Some((listener, app)) = http else {
             return Ok(());

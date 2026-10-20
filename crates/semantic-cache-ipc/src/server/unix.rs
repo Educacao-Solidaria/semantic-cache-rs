@@ -144,7 +144,7 @@ mod tests {
 
     use super::*;
     use crate::frame::{encode, kind::*};
-    use crate::server::tests::{next, PATIENCE};
+    use crate::server::tests::{limits, next, PATIENCE};
     use crate::server::{serve, Basic, Conn, Handler, Stop};
 
     /// Caminho curto: o endereço de um socket Unix cabe em ~100 bytes.
@@ -169,7 +169,8 @@ mod tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         assert_eq!(bind(&path).unwrap_err().kind(), io::ErrorKind::AddrInUse);
         let signaled = shutdown_signal().unwrap();
-        let server = tokio::spawn(serve(listener, Basic, signaled, Duration::from_secs(60)));
+        let patient = limits(Duration::from_secs(60));
+        let server = tokio::spawn(serve(listener, Basic, signaled, patient));
         let mut conn = UnixStream::connect(&path).await.unwrap();
         let ping = encode(PING, 0, 1, b"").unwrap();
         conn.write_all(&ping).await.unwrap();
@@ -244,7 +245,8 @@ mod tests {
         for drain in [Duration::ZERO, Duration::from_millis(200)] {
             let path = sock("stuck");
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-            let server = tokio::spawn(serve(bind(&path).unwrap(), Stuck, stopped, drain));
+            let listener = bind(&path).unwrap();
+            let server = tokio::spawn(serve(listener, Stuck, stopped, limits(drain)));
             let mut conn = UnixStream::connect(&path).await.unwrap();
             conn.read_exact(&mut [0]).await.unwrap(); // a task da conexão já roda
             let started = Instant::now();

@@ -211,17 +211,28 @@ fn ipc_socket_defaults_to_the_contract_path() {
     };
     assert_eq!(ipc.socket_path.to_str(), Some(path));
     assert_eq!(ipc.drain_timeout(), Duration::from_secs(5));
+    let limits = ipc.limits();
+    assert_eq!(limits.max_connections, 256);
+    assert_eq!(limits.idle, Duration::from_secs(300));
     let vars = [
         ("SEMCACHE_IPC_SOCKET_PATH", "/run/sc.sock"),
         ("SEMCACHE_IPC_DRAIN_TIMEOUT_MS", "0"),
+        ("SEMCACHE_IPC_MAX_CONNECTIONS", "8"),
+        ("SEMCACHE_IPC_IDLE_TIMEOUT_MS", "0"),
     ];
     let ipc = Config::load_with(env(&vars)).unwrap().ipc;
     assert_eq!(
         (ipc.socket_path.to_str(), ipc.drain_timeout_ms),
         (Some("/run/sc.sock"), 0)
     );
-    let err = Config::from_toml("[ipc]\nsocket_path = \"\"\n")
-        .unwrap()
-        .validate();
-    assert!(matches!(err, Err(ConfigError::Invalid(_))));
+    assert_eq!(
+        (ipc.max_connections, ipc.limits().idle),
+        (8, Duration::ZERO)
+    );
+    for bad in ["socket_path = \"\"", "max_connections = 0"] {
+        let err = Config::from_toml(&format!("[ipc]\n{bad}\n"))
+            .unwrap()
+            .validate();
+        assert!(matches!(err, Err(ConfigError::Invalid(_))), "{bad}");
+    }
 }
