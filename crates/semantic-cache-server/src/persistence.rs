@@ -2,11 +2,12 @@
 //! embutido com log estruturado, operações atômicas e recuperação depois de
 //! queda.
 //!
-//! Formato: a árvore `entries` guarda chave do cache (UTF-8) → `CacheEntry` no
-//! bincode do crate de domínio (`serialize_entry`). A árvore padrão guarda a
-//! marca do formato (magia e versão), conferida ao abrir: banco de outra
-//! versão é recusado em vez de lido errado, e uma migração futura sabe de onde
-//! parte.
+//! Formato: a árvore `entries` guarda chave do cache (UTF-8) → registro rkyv
+//! do [`crate::archive`] (cabeçalho `SCRK` v1). A árvore padrão guarda a marca
+//! do formato (magia e versão), conferida ao abrir: banco de outra versão é
+//! recusado em vez de lido errado. A v1 (PR 35/100) gravava o bincode do crate
+//! de domínio; um banco v1 sobe para v2 ao abrir, e as entradas antigas seguem
+//! legíveis (o registro rkyv se reconhece pelo cabeçalho).
 //!
 //! Durabilidade ([`Durability`]): `sync` faz o fsync antes de cada escrita
 //! voltar; `async` volta da memória e o sled grava em lote a cada
@@ -23,16 +24,20 @@ use std::path::Path;
 use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
 
 use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
-use semantic_cache_rs::{deserialize_entry, serialize_entry, CacheEntry, CacheError, CacheStore};
+use semantic_cache_rs::{deserialize_entry, CacheEntry, CacheError, CacheStore};
 
+use crate::archive;
 use crate::config::{Durability, PersistenceConfig};
 use crate::group_commit::GroupCommit;
 
 /// Chave da marca de formato, na árvore padrão.
 const FORMAT_KEY: &str = "semantic-cache/format";
 /// Magia e versão (`u16` big-endian). Mudou o formato das entradas: suba a
-/// versão e migre ao abrir.
-const FORMAT: [u8; 6] = *b"SCRS\x00\x01";
+/// versão e migre ao abrir. v2: entradas em rkyv (PR 59/100).
+const FORMAT: [u8; 6] = *b"SCRS\x00\x02";
+/// Bincode; o banco sobe para v2 ao abrir, e daí o binário antigo o recusa
+/// em vez de ler errado o que for gravado depois.
+const FORMAT_V1: [u8; 6] = *b"SCRS\x00\x01";
 const ENTRIES: &str = "entries";
 /// Cache de páginas do sled. O padrão dele é 1 GiB, que somaria ao orçamento
 /// de memória do cache; aqui o banco é um log escrito o tempo todo e lido
@@ -76,10 +81,8 @@ impl SledStore {
         let tree = db.open_tree(ENTRIES).map_err(io)?;
         match db.get(FORMAT_KEY).map_err(io)? {
             Some(found) if *found == FORMAT => {}
-            None if tree.is_empty() => {
-                db.insert(FORMAT_KEY, &FORMAT).map_err(io)?;
-                db.flush().map_err(io)?;
-            }
+            Some(found) if *found == FORMAT_V1 => mark(&db)?,
+            None if tree.is_empty() => mark(&db)?,
             found => {
                 return Err(CacheError::corrupted(format!(
                     "formato em disco desconhecido em {}: {:?} (esperado {FORMAT:?})",
@@ -131,9 +134,9 @@ impl SledStore {
     /// lote inteiro e para as escritas seguintes (ver [`GroupCommit::commit`]),
     /// e a entrada fica na árvore mas pode não sobreviver a uma queda.
     pub fn put(&self, key: &str, entry: &CacheEntry) -> Result<(), CacheError> {
-        let bytes = serialize_entry(entry)?;
-        // O codec recusa ler mais que isso: gravar seria perder a entrada ao
-        // reabrir.
+        let bytes = archive::encode(entry)?;
+        // O teto de um registro: o do codec do crate de domínio, que recusa ler
+        // mais que isso (e o que um banco v1 aceitava).
         if bytes.len() > DEFAULT_MAX_BINARY_SIZE {
             return Err(CacheError::Serialization(format!(
                 "entrada '{key}' com {} bytes passa do limite de leitura ({DEFAULT_MAX_BINARY_SIZE})",
@@ -215,8 +218,22 @@ impl fmt::Debug for SledStore {
 }
 
 /// Bytes que não decodificam são corrupção do disco, com a chave para achar.
+/// Com a magia `SCRK` é rkyv; sem ela, bincode de banco v1 (um bincode não
+/// começa por `SCRK`: seria um `id` de 5,5 GB).
 fn decode(key: &str, bytes: &[u8]) -> Result<CacheEntry, CacheError> {
-    deserialize_entry(bytes).map_err(|e| CacheError::corrupted(format!("entrada '{key}': {e}")))
+    let entry = if bytes.starts_with(&archive::MAGIC) {
+        archive::decode(bytes)
+    } else {
+        deserialize_entry(bytes)
+    };
+    entry.map_err(|e| CacheError::corrupted(format!("entrada '{key}': {e}")))
+}
+
+/// Grava a marca do formato atual (banco novo ou v1 que sobe).
+fn mark(db: &sled::Db) -> Result<(), CacheError> {
+    db.insert(FORMAT_KEY, &FORMAT).map_err(io)?;
+    db.flush().map_err(io)?;
+    Ok(())
 }
 
 fn io(err: sled::Error) -> CacheError {
@@ -233,7 +250,7 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use semantic_cache_rs::Vector;
+    use semantic_cache_rs::{serialize_entry, Vector};
 
     use super::*;
 
@@ -335,7 +352,7 @@ mod tests {
         let open = || SledStore::open(&dir.0, &config(Durability::Sync));
         let raw = |f: &dyn Fn(&sled::Db)| f(&sled::open(&dir.0).unwrap());
         drop(open().unwrap());
-        raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x02".as_slice()).unwrap()));
+        raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x03".as_slice()).unwrap()));
         let err = open().unwrap_err();
         assert!(
             matches!(err, CacheError::CorruptedData(ref m) if m.contains("formato")),
@@ -364,6 +381,40 @@ mod tests {
             2,
             "valor e chave"
         );
+    }
+
+    #[test]
+    fn v1_database_upgrades_its_mark_and_keeps_its_bincode_entries() {
+        let dir = TempDir::new("v1");
+        {
+            // Como o PR 35/100 gravava: marca v1 e entrada em bincode.
+            let db = sled::open(&dir.0).unwrap();
+            db.insert(FORMAT_KEY, FORMAT_V1.as_slice()).unwrap();
+            let old = serialize_entry(&entry("old", 4)).unwrap();
+            db.open_tree(ENTRIES).unwrap().insert("old", old).unwrap();
+        }
+        let mut store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        store.set("new".into(), entry("new", 4)).unwrap();
+        assert!(store
+            .tree
+            .get("new")
+            .unwrap()
+            .unwrap()
+            .starts_with(&archive::MAGIC));
+        for key in ["old", "new"] {
+            assert!(
+                same(&store.get(key).unwrap().unwrap(), &entry(key, 4)),
+                "{key}"
+            );
+        }
+        assert_eq!(store.entries().flatten().count(), 2);
+        drop(store);
+        let mark = sled::open(&dir.0)
+            .unwrap()
+            .get(FORMAT_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(*mark, FORMAT);
     }
 
     #[test]

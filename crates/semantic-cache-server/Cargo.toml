@@ -9,7 +9,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+# 1.81: MSRV do rkyv 0.8 (`archive`, PR 59/100).
+rust-version = "1.81"
 authors = ["Luan <in100tiva>", "Victor <VictorNascimento14>"]
 repository = "https://github.com/Educacao-Solidaria/semantic-cache-rs"
 publish = false
@@ -35,6 +36,9 @@ arc-swap = "1"
 sled = "0.34"
 # API HTTP de depuração (PR 53/100); só o necessário: HTTP/1, JSON e query.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
+# Formato zero-copy das entradas (`archive`); com o `bytecheck` (padrão), todo
+# acesso a bytes do disco é validado.
+rkyv = "0.8"
 # Codec e servidor do IPC v1; daqui só o `shutdown_signal` por enquanto.
 semantic-cache-ipc = { path = "../semantic-cache-ipc" }
 # `ServiceExt::oneshot` nos testes da API (já vem com o axum).
@@ -78,6 +82,7 @@ publish.workspace = true
 [dependencies]
 arc-swap = { workspace = true }
 axum = { workspace = true }
+rkyv = { workspace = true }
 semantic-cache-ipc = { workspace = true }
 semantic-cache-rs = { workspace = true }
 serde = { workspace = true }
