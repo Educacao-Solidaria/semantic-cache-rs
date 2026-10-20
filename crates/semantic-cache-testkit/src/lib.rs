@@ -7,6 +7,8 @@
 //!   medidas pelos benchmarks em `benches/`.
 //! - [`datasets`]: formato e loader de fixtures de embeddings de modelos.
 //! - [`fixtures`]: gerador determinístico de vetores unitários.
+//! - [`ipc`]: servidor de referência do IPC v1 (LOOKUP pela busca SIMD) sobre
+//!   o `serve` de produção, para medir e testar o caminho inteiro.
 //! - [`stress`]: harness de estresse (latência p50/p95/p99 e recall) com os
 //!   índices por trait.
 
@@ -15,4 +17,5 @@ pub mod asserts;
 pub mod bench;
 pub mod datasets;
 pub mod fixtures;
+pub mod ipc;
 pub mod stress;
