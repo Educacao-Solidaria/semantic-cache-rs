@@ -179,8 +179,8 @@ mod tests {
         let series = text.lines().filter(|l| !l.starts_with('#'));
         let exported: Vec<_> = series.filter_map(|l| l.split(['{', ' ']).next()).collect();
         for rules in [
-            include_str!("../../../deploy/prometheus/semantic-cache.rules.yml"),
-            include_str!("../../../deploy/prometheus/semantic-cache.rules.test.yml"),
+            include_str!("../../../deploy/prometheus/semantic-cache-alerts.yml"),
+            include_str!("../../../deploy/prometheus/semantic-cache-alerts.test.yml"),
         ] {
             let cited: Vec<_> = rules
                 .match_indices("semantic_cache_")

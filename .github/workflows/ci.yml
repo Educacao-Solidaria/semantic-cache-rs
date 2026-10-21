@@ -254,7 +254,7 @@ jobs:
           echo "${PROMETHEUS_SHA256}  prometheus.tar.gz" | sha256sum -c -
           tar -xzf prometheus.tar.gz --strip-components=1 "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
       - name: promtool check rules
-        run: ./promtool check rules deploy/prometheus/semantic-cache.rules.yml
+        run: ./promtool check rules deploy/prometheus/semantic-cache-alerts.yml
       # Cada regra dispara com a série que deve e cala com as que não devem.
       - name: promtool test rules
-        run: ./promtool test rules deploy/prometheus/semantic-cache.rules.test.yml
+        run: ./promtool test rules deploy/prometheus/semantic-cache-alerts.test.yml

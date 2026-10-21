@@ -2,7 +2,7 @@
 # `rule_files`). As métricas são as do contrato da Fase 4
 # (docs/observability.md): o teste `the_alert_rules_only_cite_exported_metrics`
 # do servidor confere cada nome citado aqui contra o `/metrics`, e o
-# `semantic-cache.rules.test.yml` (promtool test rules) prova que cada regra
+# `semantic-cache-alerts.test.yml` (promtool test rules) prova que cada regra
 # dispara com a série que deve e cala com a que não deve.
 groups:
   - name: semantic-cache

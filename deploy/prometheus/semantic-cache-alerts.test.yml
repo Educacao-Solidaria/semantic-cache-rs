@@ -1,8 +1,8 @@
-# promtool test rules deploy/prometheus/semantic-cache.rules.test.yml
+# promtool test rules deploy/prometheus/semantic-cache-alerts.test.yml
 # Para cada regra, a série que dispara e as que não podem disparar. Os nomes
 # também passam pelo teste do servidor que os confere contra o `/metrics`.
 rule_files:
-  - semantic-cache.rules.yml
+  - semantic-cache-alerts.yml
 
 evaluation_interval: 1m
 

@@ -57,7 +57,7 @@ scrape_configs:
 
 ## Alertas
 
-`deploy/prometheus/semantic-cache.rules.yml`, para o `rule_files` do
+`deploy/prometheus/semantic-cache-alerts.yml`, para o `rule_files` do
 Prometheus (regras do Prometheus não têm datasource nem `uid`, que são do
 Grafana: os identificadores fixos são o grupo `semantic-cache` e os nomes):
 
@@ -74,6 +74,6 @@ Grafana: os identificadores fixos são o grupo `semantic-cache` e os nomes):
 - Latência por instância (`sum by (job, instance, le)`). Com menos de 100
   LOOKUPs em 5 minutos o p99 é o máximo de poucas amostras: não alerta.
 - No CI, o job `alertas (promtool)` roda `promtool check rules` e
-  `promtool test rules` (`semantic-cache.rules.test.yml`: a série que dispara
+  `promtool test rules` (`semantic-cache-alerts.test.yml`: a série que dispara
   e as que não podem), e o teste `the_alert_rules_only_cite_exported_metrics`
   do servidor confere cada métrica, `kind` e `le` citados contra o `/metrics`.
