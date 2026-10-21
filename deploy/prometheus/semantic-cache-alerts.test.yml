@@ -1,0 +1,93 @@
+# promtool test rules deploy/prometheus/semantic-cache-alerts.test.yml
+# Para cada regra, a série que dispara e as que não podem disparar. Os nomes
+# também passam pelo teste do servidor que os confere contra o `/metrics`.
+rule_files:
+  - semantic-cache-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: memória acima de 85% do orçamento por 10 minutos
+    interval: 1m
+    input_series:
+      # cheio: 90% o tempo todo. no-limite: 85% exatos (a regra é `>`). folgado: 80%.
+      - series: 'semantic_cache_memory_bytes{job="semantic-cache",instance="cheio:8099"}'
+        values: "900x20"
+      - series: 'semantic_cache_memory_limit_bytes{job="semantic-cache",instance="cheio:8099"}'
+        values: "1000x20"
+      - series: 'semantic_cache_memory_bytes{job="semantic-cache",instance="no-limite:8099"}'
+        values: "850x20"
+      - series: 'semantic_cache_memory_limit_bytes{job="semantic-cache",instance="no-limite:8099"}'
+        values: "1000x20"
+      - series: 'semantic_cache_memory_bytes{job="semantic-cache",instance="folgado:8099"}'
+        values: "800x20"
+      - series: 'semantic_cache_memory_limit_bytes{job="semantic-cache",instance="folgado:8099"}'
+        values: "1000x20"
+    alert_rule_test:
+      # Ainda no `for`: nada dispara.
+      - eval_time: 5m
+        alertname: SemanticCacheMemoryHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: SemanticCacheMemoryHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: semantic-cache
+              instance: cheio:8099
+            exp_annotations:
+              summary: Cache semântico acima de 85% do orçamento de memória
+              description: >-
+                cheio:8099 usa 90% do orçamento de memória (memory.max_bytes)
+                há mais de 10 minutos.
+
+  - name: p99 do LOOKUP acima de 3 ms por 5 minutos
+    interval: 1m
+    input_series:
+      # lento: 1000 LOOKUP por minuto, 980 até 2 ms e 20 até 5 ms: p99 = 3,5 ms.
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="lento:8099",kind="lookup",le="0.002"}'
+        values: "0+980x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="lento:8099",kind="lookup",le="0.005"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="lento:8099",kind="lookup",le="+Inf"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_count{job="semantic-cache",instance="lento:8099",kind="lookup"}'
+        values: "0+1000x20"
+      # rapido: 1000 por minuto, todos até 1 ms (p99 < 1 ms). O STATS dele é
+      # lento (5 ms ou mais), mas só o kind="lookup" conta.
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="rapido:8099",kind="lookup",le="0.001"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="rapido:8099",kind="lookup",le="+Inf"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_count{job="semantic-cache",instance="rapido:8099",kind="lookup"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="rapido:8099",kind="stats",le="0.005"}'
+        values: "0x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="rapido:8099",kind="stats",le="+Inf"}'
+        values: "0+1000x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_count{job="semantic-cache",instance="rapido:8099",kind="stats"}'
+        values: "0+1000x20"
+      # ocioso: 2 LOOKUP por minuto, todos acima de 5 ms. O p99 passa de 3 ms,
+      # mas são 10 na janela: abaixo do piso de 100.
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="ocioso:8099",kind="lookup",le="0.005"}'
+        values: "0x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_bucket{job="semantic-cache",instance="ocioso:8099",kind="lookup",le="+Inf"}'
+        values: "0+2x20"
+      - series: 'semantic_cache_ipc_request_duration_seconds_count{job="semantic-cache",instance="ocioso:8099",kind="lookup"}'
+        values: "0+2x20"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: SemanticCacheLookupLatencyHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: SemanticCacheLookupLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: semantic-cache
+              instance: lento:8099
+            exp_annotations:
+              summary: p99 do LOOKUP do cache semântico acima de 3 ms
+              description: >-
+                lento:8099 respondeu o LOOKUP com p99 de 3.5ms nos últimos 5
+                minutos.

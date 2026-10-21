@@ -233,3 +233,28 @@ jobs:
           test -z "$(gofmt -l internal/e2erust | tee /dev/stderr)"
           go vet ./internal/e2erust/
           go test -race -count=1 -v ./internal/e2erust/
+
+  alerts:
+    name: alertas (promtool)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Baixa um binário de fora: token só de leitura.
+    permissions:
+      contents: read
+    env:
+      # promtool da release oficial, fixado; o sha256 é o do sha256sums.txt dela.
+      PROMETHEUS_VERSION: 3.5.0
+      PROMETHEUS_SHA256: e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a
+    steps:
+      - uses: actions/checkout@v4
+      - name: promtool
+        run: |
+          base="https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}"
+          curl -fsSL -o prometheus.tar.gz "$base/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          echo "${PROMETHEUS_SHA256}  prometheus.tar.gz" | sha256sum -c -
+          tar -xzf prometheus.tar.gz --strip-components=1 "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+      - name: promtool check rules
+        run: ./promtool check rules deploy/prometheus/semantic-cache-alerts.yml
+      # Cada regra dispara com a série que deve e cala com as que não devem.
+      - name: promtool test rules
+        run: ./promtool test rules deploy/prometheus/semantic-cache-alerts.test.yml

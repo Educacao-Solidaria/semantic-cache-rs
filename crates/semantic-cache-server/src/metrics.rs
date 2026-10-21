@@ -169,6 +169,41 @@ mod tests {
         }
     }
 
+    /// Toda métrica citada nas regras de alerta e nas séries do teste delas
+    /// existe no `/metrics`, e também cada valor de `kind` e `le` citado: nome
+    /// errado não passa (a regra nunca dispararia, sem erro nenhum).
+    #[test]
+    fn the_alert_rules_only_cite_exported_metrics() {
+        let budget = MemoryBudget::new(&MemoryConfig::default()).unwrap();
+        let text = render(&budget, None);
+        let series = text.lines().filter(|l| !l.starts_with('#'));
+        let exported: Vec<_> = series.filter_map(|l| l.split(['{', ' ']).next()).collect();
+        for rules in [
+            include_str!("../../../deploy/prometheus/semantic-cache-alerts.yml"),
+            include_str!("../../../deploy/prometheus/semantic-cache-alerts.test.yml"),
+        ] {
+            let cited: Vec<_> = rules
+                .match_indices("semantic_cache_")
+                .map(|(at, _)| {
+                    let name = &rules[at..];
+                    let end = name.find(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                    &name[..end.unwrap_or(name.len())]
+                })
+                .collect();
+            assert!(!cited.is_empty(), "nenhuma métrica citada");
+            for name in cited {
+                assert!(exported.contains(&name), "{name} não está no /metrics");
+            }
+            for key in [r#"kind=""#, r#"le=""#] {
+                for (at, _) in rules.match_indices(key) {
+                    let quote = at + key.len() + rules[at + key.len()..].find('"').unwrap();
+                    let pair = &rules[at..=quote];
+                    assert!(text.contains(pair), "{pair} não está no /metrics");
+                }
+            }
+        }
+    }
+
     /// O único teste da lib que observa latência: os outros só leem a forma.
     #[test]
     fn the_histograms_are_cumulative_and_their_inf_bucket_is_the_count() {
