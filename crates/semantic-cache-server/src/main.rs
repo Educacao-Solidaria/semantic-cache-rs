@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::Router;
+use semantic_cache_server::memory::MemoryBudget;
 use semantic_cache_server::persistence::SledStore;
 use semantic_cache_server::{alloc, build_info, config::Config, http, logging};
 use tokio::net::TcpListener;
@@ -67,7 +68,10 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let (listener, _socket) = semantic_cache_ipc::server::bind_owned(&config.ipc.socket_path)?;
     #[cfg(windows)]
     let listener = semantic_cache_ipc::server::bind_pipe(&config.ipc.socket_path)?;
-    let http = bind_http(config).await?;
+    // O orçamento do cache: o store do despachante (PR 52/100) reserva nele;
+    // até lá, o `/metrics` mostra 0 bytes de `memory.max_bytes`.
+    let budget = MemoryBudget::new(&config.memory)?;
+    let http = bind_http(config, budget).await?;
     info!(path = %config.ipc.socket_path.display(), "ipc no ar");
     #[cfg(unix)]
     if semantic_cache_ipc::server::in_shared_dir(&config.ipc.socket_path) {
@@ -108,7 +112,10 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
 ///
 /// ponytail: sem prazo para cabeçalho lento (o `axum::serve` não expõe); o
 /// upgrade é `hyper-util` com `header_read_timeout`.
-async fn bind_http(config: &Config) -> Result<Option<(TcpListener, Router)>, Box<dyn Error>> {
+async fn bind_http(
+    config: &Config,
+    budget: MemoryBudget,
+) -> Result<Option<(TcpListener, Router)>, Box<dyn Error>> {
     if !config.http.enabled {
         return Ok(None);
     }
@@ -122,6 +129,6 @@ async fn bind_http(config: &Config) -> Result<Option<(TcpListener, Router)>, Box
         warn!(%addr, "api de depuração fora do loopback: expõe o conteúdo do cache");
     }
     info!(%addr, "api http de depuração no ar");
-    let app = http::with_limits(http::routes(store), &config.http);
+    let app = http::with_limits(http::routes(store, budget), &config.http);
     Ok(Some((listener, app)))
 }

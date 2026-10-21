@@ -1,7 +1,8 @@
 //! Servidor MCP do semantic-cache-rs: identificação do binário, configuração,
 //! logging, alocador, orçamento de memória, persistência (com group commit
 //! dos escritores concorrentes, entradas no formato zero-copy do rkyv),
-//! leitura sem trava do estado compartilhado e a API HTTP de depuração.
+//! leitura sem trava do estado compartilhado e a API HTTP de depuração, com
+//! as métricas no formato do Prometheus.
 
 pub mod alloc;
 pub mod archive;
@@ -11,6 +12,7 @@ pub mod group_commit;
 pub mod http;
 pub mod logging;
 pub mod memory;
+pub mod metrics;
 pub mod persistence;
 pub mod snapshot;
 

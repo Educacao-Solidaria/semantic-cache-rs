@@ -17,6 +17,7 @@ use tokio::time::Sleep;
 use tracing::warn;
 
 use crate::frame::{code, encode, error_payload, kind, read_frame, FrameError};
+use crate::metrics::{self, Outcome};
 
 #[cfg(windows)]
 mod pipe;
@@ -92,11 +93,12 @@ pub async fn serve<L: Listener, H: Handler>(
                         continue;
                     };
                     let (handler, stopping) = (Arc::clone(&handler), stopping.clone());
-                    let conn = Idle::new(conn, limits.idle);
-                    // A vaga vai com a task: volta no fim dela ou no drop (pânico, aborto).
+                    let (conn, open) = (Idle::new(conn, limits.idle), metrics::Open::new());
+                    // A vaga e a contagem vão com a task: voltam no fim dela ou no
+                    // drop (pânico, aborto).
                     conns.spawn(async move {
                         handler.handle(conn, stopping).await;
-                        drop(slot);
+                        drop((slot, open));
                     });
                 }
                 // Ex.: EMFILE. A pausa evita girar em falso sem descritor.
@@ -213,6 +215,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Idle<S> {
 /// Handler mínimo até o despachante do PR 52/100, um pedido por vez e na ordem:
 /// PING → PONG; STATS → zeros (não há store por trás); outro kind → ERROR
 /// `unsupported`, e a conexão segue; frame inválido → o ERROR do contrato, e fecha.
+/// Cada pedido respondido entra em [`metrics::request`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Basic;
 
@@ -236,16 +239,18 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
         };
         let Some(frame) = frame else { return Ok(()) };
         let id = frame.request_id;
-        let reply = match frame.kind {
-            kind::PING => encode(kind::PONG, 0, id, b""),
-            kind::STATS_REQ => encode(kind::STATS_RESP, 0, id, EMPTY_STATS),
+        let (reply, outcome) = match frame.kind {
+            kind::PING => (encode(kind::PONG, 0, id, b""), Outcome::Ok),
+            kind::STATS_REQ => (encode(kind::STATS_RESP, 0, id, EMPTY_STATS), Outcome::Ok),
             other => {
                 let message = format!("kind 0x{other:02x} não suportado");
                 let payload = error_payload(code::UNSUPPORTED, &message);
-                encode(kind::ERROR, 0, id, &payload)
+                (encode(kind::ERROR, 0, id, &payload), Outcome::Error)
             }
         };
-        conn.write_all(&reply?).await?;
+        let written = conn.write_all(&reply?).await;
+        metrics::request(frame.kind, outcome.after_write(&written));
+        written?;
     }
 }
 
