@@ -8,12 +8,14 @@
 //!
 //! Vazamento é: depois do aquecimento (o 1º quarto, em que o cache enche e
 //! despeja), o pico do heap fora do orçamento (`allocated` do jemalloc menos o
-//! reservado) ou do `VmRSS` no último quarto passar do pico do 2º mais a folga;
-//! ou, no fim, conexões e descritores não voltarem à base, o orçamento não
-//! voltar a zero sem o cache, ou o heap não voltar ao que era antes.
+//! reservado) ou do residente do jemalloc no último quarto passar do pico do
+//! 2º mais a folga; ou, no fim, conexões e descritores não voltarem à base, o
+//! orçamento não voltar a zero sem o cache, ou o heap não voltar ao que era
+//! antes. O `VmRSS` só é relatado: ele varia com o kernel da máquina.
 //!
 //! `#[ignore]`: roda à parte, em release, por `SEMCACHE_SOAK_SECS` segundos
-//! (padrão 120, mínimo 20); `SEMCACHE_SOAK_CSV=<arquivo>` grava as amostras.
+//! (padrão 120, mínimo 20); `SEMCACHE_SOAK_CSV=<arquivo>` grava as amostras
+//! (segundos, heap fora do orçamento, residente, `VmRSS` e despejos).
 //! O workflow `soak` faz 3 min em todo PR e até 330 min sob demanda (o job
 //! hospedado do GitHub para em 6 h). As 12 h rodam em máquina própria ou
 //! runner dedicado:
@@ -58,7 +60,7 @@ const ROUNDS: u32 = 10;
 /// Oscilação entre os quartos que não é vazamento (pedidos em voo, retratos
 /// velhos ainda em leitura, páginas que o jemalloc devolve com atraso).
 const HEAP_SLACK: usize = 2 << 20;
-const RSS_SLACK: usize = 16 << 20;
+const RESIDENT_SLACK: usize = 8 << 20;
 /// Prazo de cada resposta, e do que tem de fechar no fim.
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -262,6 +264,8 @@ struct Sample {
     secs: f64,
     /// Heap fora do orçamento: o `allocated` do jemalloc menos o reservado.
     heap: usize,
+    /// Páginas que o jemalloc mantém residentes: vivas, sujas e metadados.
+    resident: usize,
     rss: usize,
     evicted: usize,
 }
@@ -322,14 +326,17 @@ async fn run(duration: Duration, cache: &Arc<Cache>, tally: &Arc<Tally>) -> Vec<
     let mut samples = Vec::with_capacity(1024);
     loop {
         drop(render(&cache.budget, None)); // o scrape do Prometheus
+        let jemalloc = alloc::stats().expect("jemalloc no Linux");
         let s = Sample {
             secs: started.elapsed().as_secs_f64(),
-            heap: allocated().saturating_sub(cache.budget.used()),
+            heap: jemalloc.allocated.saturating_sub(cache.budget.used()),
+            resident: jemalloc.resident,
             rss: rss(),
             evicted: cache.evicted.load(Relaxed),
         };
         if let Some(csv) = &mut csv {
-            writeln!(csv, "{:.1},{},{},{}", s.secs, s.heap, s.rss, s.evicted).expect("CSV");
+            let (heap, resident, rss) = (s.heap, s.resident, s.rss);
+            writeln!(csv, "{:.1},{heap},{resident},{rss},{}", s.secs, s.evicted).expect("CSV");
         }
         samples.push(s);
         if started.elapsed() >= duration {
@@ -385,28 +392,27 @@ fn memory_stays_flat_under_continuous_vector_load() {
     let budget_left = budget.used();
     let heap_back = eventually(|| allocated() <= base_heap + HEAP_SLACK);
     let left_kib = allocated().saturating_sub(base_heap) >> 10;
-    let heap: Vec<_> = samples.iter().map(|s| (s.secs, s.heap)).collect();
-    let rss: Vec<_> = samples.iter().map(|s| (s.secs, s.rss)).collect();
-    let (heap, rss) = (
-        growth(&heap).expect("amostras"),
-        growth(&rss).expect("amostras"),
-    );
+    let grown = |at: fn(&Sample) -> usize| {
+        let series: Vec<_> = samples.iter().map(|s| (s.secs, at(s))).collect();
+        growth(&series).expect("amostras")
+    };
+    let (heap, resident, rss) = (grown(|s| s.heap), grown(|s| s.resident), grown(|s| s.rss));
     let end = samples[samples.len() - 1].secs;
     let warmed = samples.iter().find(|s| s.secs >= end / 4.0);
     let warmed = warmed.is_some_and(|s| s.evicted > 0);
 
     let (rounds, refused) = (tally.rounds.load(Relaxed), tally.refused.load(Relaxed));
     let opened = tally.connections.load(Relaxed);
-    let (heap_kib, rss_kib) = (heap >> 10, rss >> 10);
+    let (heap_kib, resident_kib, rss_kib) = (heap >> 10, resident >> 10, rss >> 10);
     println!("soak: - {secs} s: {rounds} rodadas (STORE + 2 LOOKUP), {refused} STORE recusados, {opened} conexões, {evicted} despejos");
-    println!("soak: - do 2º ao último quarto: heap fora do orçamento +{heap_kib} KiB, residente +{rss_kib} KiB");
+    println!("soak: - do 2º ao último quarto: heap fora do orçamento +{heap_kib} KiB, residente do jemalloc +{resident_kib} KiB; VmRSS +{rss_kib} KiB (só relatório)");
     println!("soak: - no fim: orçamento {budget_left} B, heap +{left_kib} KiB sobre o de antes, {connections} conexões");
     assert!(warmed, "o cache não encheu no 1º quarto");
     // Um orçamento que recusasse quase tudo mediria um cache parado.
     let busy = rounds > 0 && refused * 100 <= rounds;
     assert!(busy, "{refused} STORE recusados em {rounds} rodadas");
     assert!(heap <= HEAP_SLACK, "heap fora do orçamento +{heap} B");
-    assert!(rss <= RSS_SLACK, "memória residente cresceu {rss} B");
+    assert!(resident <= RESIDENT_SLACK, "residente +{resident} B");
     assert_eq!(connections, 0, "conexões abertas depois do serve");
     assert!(fds_back, "{} descritores; eram {base_fds}", open_fds());
     assert_eq!(budget_left, 0, "solto o cache, o orçamento volta a zero");

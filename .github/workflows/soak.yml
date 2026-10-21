@@ -41,8 +41,9 @@ jobs:
           workspaces: crates/semantic-cache-server -> target
       - name: soak
         run: |
-          # Só dígitos chegam à aritmética do bash (que executaria `$(...)`).
-          if ! [[ "$MINUTES" =~ ^[1-9][0-9]*$ ]] || (( MINUTES > 330 )); then
+          # Só até 3 dígitos chegam à aritmética do bash, que executaria `$(...)`
+          # e dá a volta em 64 bits (2^64+1 viraria 1).
+          if ! [[ "$MINUTES" =~ ^[1-9][0-9]{0,2}$ ]] || (( MINUTES > 330 )); then
             echo "::error::minutes: inteiro de 1 a 330"; exit 1
           fi
           export SEMCACHE_SOAK_SECS=$(( MINUTES * 60 )) SEMCACHE_SOAK_CSV="$RUNNER_TEMP/soak.csv"
