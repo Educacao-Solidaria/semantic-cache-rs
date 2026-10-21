@@ -50,6 +50,8 @@ use tokio::time::timeout;
 const DIM: usize = 1536;
 /// ~3 mil entradas de ~10 KiB; cada despejo leva 10% delas.
 const BUDGET: usize = 32 << 20;
+/// A marca d'água baixa padrão (0,8): onde o despejo deixa o índice.
+const LOW: usize = BUDGET / 5 * 4;
 const CLIENTS: u64 = 4;
 /// Rodadas (STORE + 2 LOOKUP) por conexão, antes de fechá-la e abrir outra.
 const ROUNDS: u32 = 10;
@@ -85,12 +87,16 @@ struct Cache {
 }
 
 impl Evictor for Cache {
-    fn evict(&self, bytes: usize) {
+    /// FIFO até as entradas do índice caberem na marca baixa. O `bytes` pedido
+    /// conta também as já despejadas que um retrato em leitura segura: despejar
+    /// por ele, a cada reserva, esvaziava o índice quando a leitura demorava.
+    fn evict(&self, _bytes: usize) {
         self.entries.update(|old| {
-            let (mut next, mut freed) = (old.clone(), 0);
-            while freed < bytes {
+            let mut next = old.clone();
+            let mut live: usize = next.iter().map(|e| e.paid.bytes()).sum();
+            while live > LOW {
                 let Some(entry) = next.pop_front() else { break };
-                freed += entry.paid.bytes();
+                live -= entry.paid.bytes();
                 self.evicted.fetch_add(1, Relaxed);
             }
             next
