@@ -234,6 +234,17 @@ mod tests {
         assert!(others.iter().all(|&k| KINDS[kind_index(k)] == "unknown"));
     }
 
+    /// O texto do `le` é o próprio limite em segundos, e a lista é a do contrato.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // limites < 2⁵³
+    fn the_buckets_are_the_contract_ones_and_each_le_is_its_limit() {
+        let contract = "0.0001 0.00025 0.0005 0.001 0.002 0.005 0.01 0.025";
+        assert_eq!(BUCKETS.map(|(_, le)| le).join(" "), contract);
+        for (nanos, le) in BUCKETS {
+            assert_eq!(le.parse::<f64>().unwrap() * 1e9, nanos as f64, "{le}");
+        }
+    }
+
     #[test]
     fn each_observation_falls_in_the_first_bucket_that_holds_it() {
         let empty = Histogram::new().snapshot();
