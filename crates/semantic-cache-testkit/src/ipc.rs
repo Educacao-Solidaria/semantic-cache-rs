@@ -8,12 +8,14 @@
 //! (o bench `ipc`, o teste de carga e o e2e com o gateway Go, pelo binário
 //! `reference-server`) usa este handler.
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{PoisonError, RwLock};
 use std::time::Instant;
 
 use semantic_cache_ipc::frame::{code, encode, error_payload, kind, read_frame, Frame};
 use semantic_cache_ipc::server::{Conn, Handler, Stop};
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
@@ -37,13 +39,94 @@ pub struct LookupResp {
     pub latency_micros: i64,
 }
 
-/// Payload do `STORE_REQ`. ponytail: `prompt` e `ttl_seconds` são ignorados
-/// (a busca é pelo embedding, e a entrada nunca expira); o TTL é do store de
-/// produção (PR 52/100).
-#[derive(Deserialize)]
-struct StoreReq {
-    response: String,
-    embedding: Vec<f32>,
+/// O que o `LOOKUP_REQ` e o `STORE_REQ` trazem e o servidor usa, lido sem alocar
+/// o resto: o embedding já nasce do tamanho do índice (pelo `Vec` do serde ele
+/// cresceria dobrando, 10 alocações em 1536 dimensões), e o `prompt` (só se
+/// confere que veio) e o `ttl_seconds` são pulados. ponytail: os dois são
+/// ignorados (a busca é pelo embedding, e a entrada nunca expira); o TTL é do
+/// store de produção (PR 52/100).
+#[derive(Default)]
+struct Fields {
+    prompt: bool,
+    embedding: Option<Vec<f32>>,
+    threshold: Option<f32>,
+    response: Option<String>,
+}
+
+impl Fields {
+    /// `None` se `payload` não é um objeto JSON com os campos nos tipos certos.
+    fn parse(payload: &[u8], dim: usize) -> Option<Self> {
+        let mut json = serde_json::Deserializer::from_slice(payload);
+        let fields = json.deserialize_map(Dim(dim)).ok()?;
+        json.end().ok()?;
+        Some(fields)
+    }
+}
+
+/// Visitante do pedido: o objeto, com a dimensão do índice para o embedding.
+struct Dim(usize);
+
+impl<'de> Visitor<'de> for Dim {
+    type Value = Fields;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("o objeto do pedido")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Fields, A::Error> {
+        let mut fields = Fields::default();
+        // Chave emprestada: as do contrato não têm escape.
+        while let Some(key) = map.next_key::<&str>()? {
+            match key {
+                "embedding" => fields.embedding = Some(map.next_value_seed(Floats(self.0))?),
+                "threshold" => fields.threshold = Some(map.next_value()?),
+                "response" => fields.response = Some(map.next_value()?),
+                other => {
+                    map.next_value::<IgnoredAny>()?;
+                    fields.prompt |= other == "prompt";
+                }
+            }
+        }
+        Ok(fields)
+    }
+}
+
+/// O embedding, com espaço para a dimensão do índice desde o início.
+struct Floats(usize);
+
+impl<'de> DeserializeSeed<'de> for Floats {
+    type Value = Vec<f32>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Vec<f32>, D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Floats {
+    type Value = Vec<f32>;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("uma lista de números")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<f32>, A::Error> {
+        let mut floats = Vec::with_capacity(self.0);
+        while let Some(x) = seq.next_element()? {
+            floats.push(x);
+        }
+        Ok(floats)
+    }
+}
+
+/// O `LOOKUP_RESP` com o texto emprestado do índice: o mesmo JSON do
+/// [`LookupResp`], sem clonar o texto.
+#[derive(Serialize)]
+struct Reply<'a> {
+    hit: bool,
+    score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cached_response: Option<&'a str>,
+    latency_micros: i64,
 }
 
 /// Payload do `STATS_RESP` (o `cache.StatsResult` do gateway).
@@ -92,8 +175,14 @@ impl<I: VectorIndex> SearchCache<I> {
         }
     }
 
-    /// O frame que responde a `frame`, já conferido pelo codec.
-    fn answer(&self, frame: &Frame) -> Vec<u8> {
+    /// O frame que responde a `frame`, já conferido pelo codec (o que o
+    /// handler escreve; público para o `tests/heap.rs` contar as alocações).
+    ///
+    /// # Panics
+    ///
+    /// Não na prática: só se um ERROR curto passasse do teto do frame.
+    #[must_use]
+    pub fn answer(&self, frame: &Frame) -> Vec<u8> {
         let id = frame.request_id;
         let error = |code, message: &str| encode(kind::ERROR, 0, id, &error_payload(code, message));
         let reply = match frame.kind {
@@ -122,32 +211,37 @@ impl<I: VectorIndex> SearchCache<I> {
     /// mensagem de erro não leva o prompt nem o embedding (contrato).
     fn lookup(&self, payload: &[u8]) -> Result<Vec<u8>, String> {
         let started = Instant::now();
-        let req: LookupReq =
-            serde_json::from_slice(payload).map_err(|_| "LOOKUP_REQ ilegível".to_owned())?;
-        let query = self.checked(&req.embedding)?;
+        let illegible = || "LOOKUP_REQ ilegível".to_owned();
+        let req = Fields::parse(payload, self.dim).ok_or_else(illegible)?;
+        let (true, Some(embedding), Some(threshold)) = (req.prompt, req.embedding, req.threshold)
+        else {
+            return Err(illegible());
+        };
+        let query = self.checked(embedding)?;
         let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
         let best = entries.index.search(&query, 1).first().copied();
         let cached = best
-            .filter(|b| b.score >= req.threshold)
-            .and_then(|b| entries.responses.get(b.id).cloned().flatten());
-        drop(entries);
+            .filter(|b| b.score >= threshold)
+            .and_then(|b| entries.responses.get(b.id)?.as_deref());
         let counter = if cached.is_some() {
             &self.hits
         } else {
             &self.misses
         };
         counter.fetch_add(1, Ordering::Relaxed);
-        let resp = LookupResp {
+        // Serializa ainda com a trava de leitura: o texto vai do índice direto
+        // para o JSON, sem cópia.
+        let reply = Reply {
             hit: cached.is_some(),
             score: best.map_or(0.0, |b| b.score),
             cached_response: cached,
             latency_micros: i64::try_from(started.elapsed().as_micros()).unwrap_or(i64::MAX),
         };
-        Ok(serde_json::to_vec(&resp).expect("struct sem mapa sempre serializa"))
+        Ok(serde_json::to_vec(&reply).expect("struct sem mapa sempre serializa"))
     }
 
     /// `embedding` na dimensão do índice, com norma 1 (ver [`unit`]).
-    fn checked(&self, embedding: &[f32]) -> Result<Vec<f32>, String> {
+    fn checked(&self, embedding: Vec<f32>) -> Result<Vec<f32>, String> {
         if embedding.len() != self.dim {
             return Err(format!("dimensão {} ≠ {}", embedding.len(), self.dim));
         }
@@ -157,16 +251,19 @@ impl<I: VectorIndex> SearchCache<I> {
     /// Guarda o texto com o próximo id do índice; a mensagem de erro não leva
     /// o texto nem o embedding (contrato).
     fn store(&self, payload: &[u8]) -> Result<(), String> {
-        let req: StoreReq =
-            serde_json::from_slice(payload).map_err(|_| "STORE_REQ ilegível".to_owned())?;
-        let vector = self.checked(&req.embedding)?;
+        let illegible = || "STORE_REQ ilegível".to_owned();
+        let req = Fields::parse(payload, self.dim).ok_or_else(illegible)?;
+        let (Some(embedding), Some(response)) = (req.embedding, req.response) else {
+            return Err(illegible());
+        };
+        let vector = self.checked(embedding)?;
         let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         let id = entries.index.len();
         entries.index.insert(&vector);
         if entries.responses.len() <= id {
             entries.responses.resize(id + 1, None);
         }
-        entries.responses[id] = Some(req.response);
+        entries.responses[id] = Some(response);
         Ok(())
     }
 
@@ -192,15 +289,20 @@ impl<I: VectorIndex> SearchCache<I> {
     }
 }
 
-/// `v` com norma 1: o índice compara cossenos de vetores unitários, e um
-/// vetor quase zero (que quantizaria para zeros) vale pela direção. A norma
-/// sai em f64, sem estourar nem zerar no quadrado; `None` se for zero ou não
-/// finita (o JSON não carrega NaN, mas `1e39` chega ao f32 como infinito).
-fn unit(v: &[f32]) -> Option<Vec<f32>> {
+/// `v` com norma 1, no lugar: o índice compara cossenos de vetores unitários,
+/// e um vetor quase zero (que quantizaria para zeros) vale pela direção. A
+/// norma sai em f64, sem estourar nem zerar no quadrado; `None` se for zero ou
+/// não finita (o JSON não carrega NaN, mas `1e39` chega ao f32 como infinito).
+#[allow(clippy::cast_possible_truncation)] // cada componente fica em [-1, 1]
+fn unit(mut v: Vec<f32>) -> Option<Vec<f32>> {
     let norm = v.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
-    #[allow(clippy::cast_possible_truncation)] // cada componente fica em [-1, 1]
-    let scaled = |x: f32| (f64::from(x) / norm) as f32;
-    (norm > 0.0 && norm.is_finite()).then(|| v.iter().copied().map(scaled).collect())
+    if !(norm > 0.0 && norm.is_finite()) {
+        return None;
+    }
+    for x in &mut v {
+        *x = (f64::from(*x) / norm) as f32;
+    }
+    Some(v)
 }
 
 impl<I: VectorIndex + Send + Sync + 'static> Handler for SearchCache<I> {
@@ -229,6 +331,7 @@ mod tests {
     use std::time::Duration;
 
     use semantic_cache_ipc::frame::kind::*;
+    use semantic_cache_ipc::frame::HEADER_LEN;
     use serde_json::{json, Value};
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::sync::watch;
@@ -387,6 +490,44 @@ mod tests {
         }
         let stats = json!({"total_entries": 4, "hit_count": 1, "miss_count": 1, "hit_ratio": 0.5});
         assert_eq!(*body(6), stats);
+    }
+
+    /// O pedido sai lido com o embedding do tamanho do índice, pulando o que é
+    /// ignorado, e recusado como o `serde_json::from_slice` recusaria.
+    #[test]
+    fn the_request_is_read_at_the_index_dimension_and_refused_like_serde() {
+        let body =
+            br#"{"prompt":"a\"b","ttl_seconds":5,"embedding":[1,2],"x":{"y":[]},"threshold":0.5}"#;
+        let fields = Fields::parse(body, 4).unwrap();
+        let embedding = fields.embedding.unwrap();
+        assert_eq!((embedding.capacity(), embedding), (4, vec![1.0, 2.0]));
+        assert!(fields.prompt && fields.threshold == Some(0.5));
+        for bad in [
+            &br#"{"embedding":"1,2"}"#[..],
+            br#"{"threshold":"0.5"}"#,
+            br"[1,2]",
+            br"{} lixo",
+            br#"{"embedding":[1,2"#,
+        ] {
+            assert!(
+                Fields::parse(bad, 4).is_none(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // O LOOKUP sem `prompt` é ilegível (o STORE não o pede), mesmo com outra
+        // chave ignorada no lugar.
+        let cache = cache::<FlatF32>();
+        let body = br#"{"ttl_seconds":5,"embedding":[1,0,0,0],"threshold":0.9}"#;
+        let reply = cache.answer(&Frame {
+            kind: LOOKUP_REQ,
+            request_id: 1,
+            payload: body.to_vec(),
+        });
+        assert_eq!(reply[5], ERROR); // o byte do kind
+        let payload = &reply[HEADER_LEN..reply.len() - 4]; // sem o cabeçalho e o CRC
+        let payload: Value = serde_json::from_slice(payload).unwrap();
+        assert_eq!(payload["message"], "LOOKUP_REQ ilegível");
     }
 
     #[tokio::test]

@@ -37,6 +37,11 @@ semantic-cache-simd = { path = "../semantic-cache-simd" }
 semantic-cache-ipc = { path = "../semantic-cache-ipc" }
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
+# Conta as alocações do caminho do LOOKUP (`tests/heap.rs`, no modo de testes
+# do dhat): só nos testes, nunca no binário do servidor.
+[dev-dependencies]
+dhat = "0.3"
+
 # O alocador do servidor no bench `ipc`: com o do sistema, o `FlatI8` (uma alocação
 # por vetor) espalha os códigos pelo heap da linha anterior e busca até 3× mais devagar.
 [target.'cfg(not(target_env = "msvc"))'.dev-dependencies]
