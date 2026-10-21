@@ -8,7 +8,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{watch, Semaphore};
@@ -238,7 +238,7 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
             frame = read_frame(conn) => frame?,
         };
         let Some(frame) = frame else { return Ok(()) };
-        let id = frame.request_id;
+        let (id, started) = (frame.request_id, Instant::now());
         let (reply, outcome) = match frame.kind {
             kind::PING => (encode(kind::PONG, 0, id, b""), Outcome::Ok),
             kind::STATS_REQ => (encode(kind::STATS_RESP, 0, id, EMPTY_STATS), Outcome::Ok),
@@ -249,15 +249,13 @@ async fn answer(conn: &mut impl Conn, stop: &mut Stop) -> Result<(), FrameError>
             }
         };
         let written = conn.write_all(&reply?).await;
-        metrics::request(frame.kind, outcome.after_write(&written));
+        metrics::request(frame.kind, outcome.after_write(&written), started.elapsed());
         written?;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use serde_json::{json, Value};
     use tokio::io::{duplex, AsyncReadExt, DuplexStream};
     use tokio::sync::mpsc;
