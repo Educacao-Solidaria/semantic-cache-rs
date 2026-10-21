@@ -1,13 +1,13 @@
-//! API HTTP de depuração, só leitura: saúde, estatísticas e inspeção das
-//! entradas persistidas, para olhar o cache com `curl`. As rotas de consulta e
-//! gravação são do PR 54/100: entram com `routes(..).merge(..)` antes do
+//! API HTTP de depuração, só leitura: saúde, estatísticas, métricas do
+//! Prometheus e inspeção das entradas persistidas, para olhar o cache com
+//! `curl`. As rotas de consulta e gravação são do PR 54/100: entram com `routes(..).merge(..)` antes do
 //! [`with_limits`], que vale para todas.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{DefaultBodyLimit, Query, Request, State};
-use axum::http::{header::HOST, uri::Authority, StatusCode};
+use axum::http::{header, header::HOST, uri::Authority, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -17,8 +17,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config::HttpConfig;
+use crate::memory::MemoryBudget;
 use crate::persistence::SledStore;
-use crate::{alloc, build_info};
+use crate::{alloc, build_info, metrics};
 
 /// Teto de entradas numa resposta do `/cache/entries`.
 pub const MAX_ENTRIES: usize = 1000;
@@ -26,19 +27,26 @@ pub const MAX_ENTRIES: usize = 1000;
 #[derive(Debug, Clone)]
 struct Inspected {
     store: Option<Arc<SledStore>>,
+    budget: MemoryBudget,
     started: Instant,
 }
 
-/// `/health` e `/stats`; com persistência, também `/cache/entries`.
-pub fn routes(store: Option<Arc<SledStore>>) -> Router {
+/// `/health`, `/stats` e `/metrics` (`budget` é o orçamento do store); com
+/// persistência, também `/cache/entries`.
+pub fn routes(store: Option<Arc<SledStore>>, budget: MemoryBudget) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
-        .route("/stats", get(stats));
+        .route("/stats", get(stats))
+        .route("/metrics", get(prometheus));
     if store.is_some() {
         router = router.route("/cache/entries", get(entries));
     }
     let started = Instant::now();
-    router.with_state(Inspected { store, started })
+    router.with_state(Inspected {
+        store,
+        budget,
+        started,
+    })
 }
 
 /// Teto do corpo e prazo por pedido em todas as rotas de `router`. O corpo é
@@ -92,6 +100,12 @@ async fn stats(State(state): State<Inspected>) -> Json<Value> {
     }))
 }
 
+/// Só lê contadores atômicos: nada de disco, cabe na thread do runtime.
+async fn prometheus(State(state): State<Inspected>) -> impl IntoResponse {
+    let text = metrics::render(&state.budget, state.store.as_deref());
+    ([(header::CONTENT_TYPE, metrics::CONTENT_TYPE)], text)
+}
+
 #[derive(Debug, Deserialize)]
 struct Page {
     limit: Option<usize>,
@@ -136,7 +150,24 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::config::PersistenceConfig;
+    use crate::config::{MemoryConfig, PersistenceConfig};
+
+    fn budget() -> MemoryBudget {
+        MemoryBudget::new(&MemoryConfig::default()).unwrap()
+    }
+
+    /// O texto do `GET /metrics` como o Prometheus pede (`Host` com a porta),
+    /// conferidos o status e o `Content-Type`.
+    async fn scrape(app: &Router) -> String {
+        let request = Request::get("/metrics").header(HOST, "127.0.0.1:8099");
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap());
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let kind = &response.headers()[header::CONTENT_TYPE];
+        assert_eq!(kind, metrics::CONTENT_TYPE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
 
     /// `(status, corpo em JSON)`, com `Host: localhost`; corpo que não é JSON
     /// vira `null`.
@@ -157,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_and_stats_answer_without_persistence() {
-        let router = routes(None);
+        let router = routes(None, budget());
         let (status, body) = call(&router, "GET", "/health", "").await;
         assert_eq!((status, &body["status"]), (StatusCode::OK, &json!("ok")));
         assert_eq!(body["version"], build_info::version_line());
@@ -199,7 +230,7 @@ mod tests {
             };
             store.put(key, &entry).unwrap();
         }
-        let router = routes(Some(store));
+        let router = routes(Some(store), budget());
         let (status, body) = call(&router, "GET", "/cache/entries?limit=2", "").await;
         let expected = |key: &str, prompt: &str| {
             json!({ "key": key, "id": key, "prompt": prompt, "response_bytes": 8, "dimension": 3,
@@ -215,8 +246,18 @@ mod tests {
             call(&router, "GET", "/stats", "").await.1["store_entries"],
             3
         );
+        let text = scrape(&router).await;
+        assert!(text.contains("\nsemantic_cache_entries 3\n"), "{text}");
         drop(router);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_answer_the_scrape_through_the_loopback_guard() {
+        let app = with_limits(routes(None, budget()), &HttpConfig::default());
+        let text = scrape(&app).await;
+        let limit = "\nsemantic_cache_memory_limit_bytes 1073741824\n";
+        assert!(text.contains(limit), "{text}");
     }
 
     #[tokio::test]
@@ -229,7 +270,7 @@ mod tests {
         let extra = Router::new()
             .route("/echo", post(|body: String| async move { body }))
             .route("/slow", get(std::future::pending::<String>));
-        let app = with_limits(routes(None).merge(extra), &config);
+        let app = with_limits(routes(None, budget()).merge(extra), &config);
         assert_eq!(
             call(&app, "POST", "/echo", "12345678").await.0,
             StatusCode::OK
@@ -245,7 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_listener_only_answers_loopback_hosts() {
-        let app = with_limits(routes(None), &HttpConfig::default());
+        let app = with_limits(routes(None, budget()), &HttpConfig::default());
         let host = |host: &'static str| {
             let request = Request::get("/health")
                 .header(HOST, host)
@@ -270,7 +311,7 @@ mod tests {
         let request = Request::get("/health")
             .header(HOST, "cache.interno")
             .body(Body::empty());
-        let response = with_limits(routes(None), &open)
+        let response = with_limits(routes(None, budget()), &open)
             .oneshot(request.unwrap())
             .await;
         assert_eq!(response.unwrap().status(), StatusCode::OK);
