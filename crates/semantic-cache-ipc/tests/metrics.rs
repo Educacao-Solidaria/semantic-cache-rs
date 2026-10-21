@@ -6,7 +6,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use semantic_cache_ipc::frame::{discarded_frames, encode, kind, read_frame};
-use semantic_cache_ipc::metrics::{connections, lookups, requests};
+use semantic_cache_ipc::metrics::{connections, lookups, request_seconds, requests};
 use semantic_cache_ipc::server::{serve, Basic, Limits, Listener};
 use tokio::io::{duplex, AsyncWriteExt, DuplexStream};
 use tokio::sync::{mpsc, oneshot};
@@ -93,6 +93,13 @@ async fn requests_connections_and_discarded_frames_are_counted() {
     until("a conexão parada não conta", || connections() == 1).await;
     until("stats no prazo", || count("stats", "timeout") == 1).await;
     until("a conexão vencida ainda conta", || connections() == 0).await;
+
+    // A latência vai junto: 2 PING (ok e cancelado) e 2 STATS, o parado no +Inf.
+    let latency = |kind| request_seconds().find(|&(k, _)| k == kind).unwrap().1;
+    assert_eq!(latency("ping").snapshot().0[8], 2);
+    let (stats, seconds) = latency("stats").snapshot();
+    assert!(stats[7] <= 1 && stats[8] == 2, "{stats:?}");
+    assert!(seconds >= 2.0, "o parado esperou o prazo: {seconds}");
 
     stop.send(()).unwrap();
     let ended = tokio::time::timeout(PATIENCE, server).await;

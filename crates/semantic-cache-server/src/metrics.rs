@@ -36,12 +36,28 @@ pub fn render(budget: &MemoryBudget, store: Option<&SledStore>) -> String {
         line(&mut out, "semantic_cache_ipc_requests_total", &labels, n);
     }
     out.push_str(
+        "# HELP semantic_cache_ipc_request_duration_seconds Latência dos pedidos IPC, do frame lido à resposta escrita.\n\
+         # TYPE semantic_cache_ipc_request_duration_seconds histogram\n",
+    );
+    for (kind, latency) in ipc::request_seconds() {
+        let name = "semantic_cache_ipc_request_duration_seconds";
+        histogram(&mut out, name, &format!(r#"kind="{kind}""#), latency);
+    }
+    out.push_str(
         "# HELP semantic_cache_lookups_total LOOKUP atendidos, pelo resultado da busca.\n\
          # TYPE semantic_cache_lookups_total counter\n",
     );
     for (result, n) in ipc::lookups() {
         let labels = format!(r#"result="{result}""#);
         line(&mut out, "semantic_cache_lookups_total", &labels, n);
+    }
+    out.push_str(
+        "# HELP semantic_cache_search_duration_seconds Latência das buscas top-k, por índice.\n\
+         # TYPE semantic_cache_search_duration_seconds histogram\n",
+    );
+    for (index, latency) in ipc::search_seconds() {
+        let name = "semantic_cache_search_duration_seconds";
+        histogram(&mut out, name, &format!(r#"index="{index}""#), latency);
     }
     let entries = store.map_or(0, CacheStore::len);
     let (used, limit) = (budget.used(), budget.limit());
@@ -74,16 +90,34 @@ fn line(out: &mut String, name: &str, labels: &str, value: u64) {
     let _ = writeln!(out, "{name}{{{labels}}} {value}");
 }
 
+/// As séries de um histograma: `_bucket` cumulativo por `le`, terminando no
+/// `+Inf` (o total), `_sum` em segundos e `_count`, igual ao `+Inf`.
+fn histogram(out: &mut String, name: &str, labels: &str, latency: &ipc::Histogram) {
+    let (cumulative, seconds) = latency.snapshot();
+    let les = ipc::BUCKETS.iter().map(|&(_, le)| le).chain(["+Inf"]);
+    for (le, n) in les.zip(cumulative) {
+        let _ = writeln!(out, r#"{name}_bucket{{{labels},le="{le}"}} {n}"#);
+    }
+    let count = cumulative[ipc::BUCKETS.len()];
+    let _ = writeln!(out, "{name}_count{{{labels}}} {count}");
+    let _ = writeln!(out, "{name}_sum{{{labels}}} {seconds}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::MemoryConfig;
 
     /// `(família e tipo, labels de cada série)` na ordem do texto: a tabela do
-    /// contrato da Fase 4, menos os histogramas (PR 79/100).
-    const CONTRACT: [(&str, &str); 7] = [
+    /// contrato da Fase 4 (os `_bucket` levam também o `le`).
+    const CONTRACT: [(&str, &str); 9] = [
         ("semantic_cache_ipc_requests_total counter", "kind,outcome"),
+        (
+            "semantic_cache_ipc_request_duration_seconds histogram",
+            "kind",
+        ),
         ("semantic_cache_lookups_total counter", "result"),
+        ("semantic_cache_search_duration_seconds histogram", "index"),
         ("semantic_cache_entries gauge", ""),
         ("semantic_cache_memory_bytes gauge", ""),
         ("semantic_cache_memory_limit_bytes gauge", ""),
@@ -101,23 +135,82 @@ mod tests {
             .collect();
         assert_eq!(typed, CONTRACT.map(|(family, _)| family));
         assert_eq!(text.matches("# HELP ").count(), CONTRACT.len());
-        // Cada série: de uma família declarada, com os labels dela, valor inteiro.
+        // As séries de cada família, com as chaves dos labels: histograma
+        // emite `_bucket` (com o `le`), `_sum` e `_count`.
+        let mut allowed = Vec::new();
+        for (family, keys) in CONTRACT {
+            let (name, kind) = family.split_once(' ').unwrap();
+            if kind == "histogram" {
+                allowed.push((format!("{name}_bucket"), format!("{keys},le")));
+                allowed.push((format!("{name}_sum"), keys.to_owned()));
+                allowed.push((format!("{name}_count"), keys.to_owned()));
+            } else {
+                allowed.push((name.to_owned(), keys.to_owned()));
+            }
+        }
+        // Cada série: de uma família declarada, com os labels dela, valor ≥ 0.
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let (series, value) = line.rsplit_once(' ').unwrap();
-            assert!(value.parse::<u64>().is_ok(), "{line}");
+            assert!(value.parse::<f64>().unwrap() >= 0.0, "{line}");
             let (name, labels) = series.split_once('{').unwrap_or((series, ""));
             let keys: Vec<_> = labels
                 .split(',')
                 .filter_map(|l| l.split_once('='))
                 .collect();
             let keys = keys.iter().map(|(k, _)| *k).collect::<Vec<_>>().join(",");
-            let family = CONTRACT
-                .iter()
-                .find(|c| c.0.split(' ').next() == Some(name));
-            assert_eq!(family.map(|c| c.1), Some(keys.as_str()), "{line}");
+            assert!(allowed.contains(&(name.to_owned(), keys)), "{line}");
         }
-        let requests = text.matches("semantic_cache_ipc_requests_total{").count();
-        assert_eq!(requests, 6 * 4, "toda combinação de kind e outcome");
+        for (series, expected) in [
+            ("semantic_cache_ipc_requests_total{", 6 * 4),
+            ("semantic_cache_ipc_request_duration_seconds_bucket{", 6 * 9),
+            ("semantic_cache_search_duration_seconds_bucket{", 3 * 9),
+        ] {
+            assert_eq!(text.matches(series).count(), expected, "{series}");
+        }
+    }
+
+    /// O único teste da lib que observa latência: os outros só leem a forma.
+    #[test]
+    fn the_histograms_are_cumulative_and_their_inf_bucket_is_the_count() {
+        use semantic_cache_ipc::frame::kind::LOOKUP_REQ;
+        use semantic_cache_ipc::metrics::{request, search, Index, Outcome, BUCKETS};
+        use std::time::Duration;
+
+        for micros in [50, 150, 3_000, 30_000] {
+            request(LOOKUP_REQ, Outcome::Ok, Duration::from_micros(micros));
+        }
+        search(Index::Hnsw, Duration::from_micros(400));
+        let budget = MemoryBudget::new(&MemoryConfig::default()).unwrap();
+        let text = render(&budget, None);
+        let has = |line: &str| assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+        let les: Vec<_> = BUCKETS.iter().map(|b| b.1).chain(["+Inf"]).collect();
+        let lookup = "semantic_cache_ipc_request_duration_seconds_bucket{kind=\"lookup\"";
+        for (le, n) in les.iter().zip([1, 2, 2, 2, 2, 3, 3, 3, 4]) {
+            has(&format!(r#"{lookup},le="{le}"}} {n}"#));
+        }
+        has(r#"semantic_cache_ipc_request_duration_seconds_sum{kind="lookup"} 0.0332"#);
+        has(r#"semantic_cache_ipc_request_duration_seconds_count{kind="lookup"} 4"#);
+        has(r#"semantic_cache_search_duration_seconds_bucket{index="hnsw",le="0.00025"} 0"#);
+        has(r#"semantic_cache_search_duration_seconds_bucket{index="hnsw",le="0.0005"} 1"#);
+        has(r#"semantic_cache_search_duration_seconds_sum{index="hnsw"} 0.0004"#);
+        // Em toda série: os `le` na ordem do contrato, contagem que não desce,
+        // e o `+Inf` igual ao `_count`.
+        let buckets: Vec<_> = text.lines().filter(|l| l.contains("_bucket{")).collect();
+        for series in buckets.chunks(les.len()) {
+            let (head, _) = series[0].split_once(",le=").unwrap();
+            let mut counts = Vec::new();
+            for (line, le) in series.iter().zip(&les) {
+                let (labels, n) = line.rsplit_once(' ').unwrap();
+                assert_eq!(labels, format!(r#"{head},le="{le}"}}"#));
+                counts.push(n.parse::<u64>().unwrap());
+            }
+            assert!(
+                counts.windows(2).all(|w| w[0] <= w[1]),
+                "{head}: {counts:?}"
+            );
+            let count = format!("{}}} {}", head.replace("_bucket{", "_count{"), counts[8]);
+            has(&count);
+        }
     }
 
     #[test]
