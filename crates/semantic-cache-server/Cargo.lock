@@ -681,6 +681,7 @@ dependencies = [
  "rkyv",
  "semantic-cache-ipc",
  "semantic-cache-rs",
+ "semantic-cache-simd",
  "serde",
  "serde_json",
  "sled",
@@ -693,6 +694,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "semantic-cache-simd"
+version = "0.1.0"
 
 [[package]]
 name = "serde"

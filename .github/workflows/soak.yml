@@ -1,0 +1,58 @@
+name: soak
+
+# Soak de memória do servidor (crates/semantic-cache-server/tests/soak.rs): 3 min
+# em todo PR e na main; sob demanda, até 330 min, porque o job hospedado para em
+# 6 h. As 12 h rodam em máquina própria ou runner dedicado (comando no teste).
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutos de carga (1 a 330)
+        type: number
+        default: 60
+
+concurrency:
+  group: soak-${{ github.event_name }}-${{ github.ref }}
+  # Push novo num PR cancela a rodada curta anterior; a longa nunca é cancelada.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: soak (memória sob carga vetorial)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 360 || 30 }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/semantic-cache-server
+    env:
+      MINUTES: ${{ inputs.minutes || 3 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/semantic-cache-server -> target
+      - name: soak
+        run: |
+          # Só dígitos chegam à aritmética do bash (que executaria `$(...)`).
+          if ! [[ "$MINUTES" =~ ^[1-9][0-9]*$ ]] || (( MINUTES > 330 )); then
+            echo "::error::minutes: inteiro de 1 a 330"; exit 1
+          fi
+          export SEMCACHE_SOAK_SECS=$(( MINUTES * 60 )) SEMCACHE_SOAK_CSV="$RUNNER_TEMP/soak.csv"
+          cargo test --release --locked --test soak -- --ignored --nocapture | tee "$RUNNER_TEMP/soak.log"
+      - name: resumo
+        if: always()
+        run: |
+          sed -n 's/^soak: //p' "$RUNNER_TEMP/soak.log" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-amostras
+          path: ${{ runner.temp }}/soak.csv

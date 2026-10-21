@@ -100,6 +100,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# A busca vetorial do soak (`tests/soak.rs`), com os kernels de produção.
+semantic-cache-simd = { path = "../semantic-cache-simd" }
 tower = { workspace = true }
 
 # jemalloc não compila com o toolchain MSVC; lá o servidor fica no alocador
