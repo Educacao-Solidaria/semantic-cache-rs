@@ -54,3 +54,26 @@ scrape_configs:
     static_configs:
       - targets: ["127.0.0.1:8099"]
 ```
+
+## Alertas
+
+`deploy/prometheus/semantic-cache.rules.yml`, para o `rule_files` do
+Prometheus (regras do Prometheus não têm datasource nem `uid`, que são do
+Grafana: os identificadores fixos são o grupo `semantic-cache` e os nomes):
+
+| Alerta | Dispara quando | `for` |
+|---|---|---|
+| `SemanticCacheMemoryHigh` | `semantic_cache_memory_bytes / semantic_cache_memory_limit_bytes > 0.85` | 10m |
+| `SemanticCacheLookupLatencyHigh` | p99 do LOOKUP acima de 3 ms (`histogram_quantile(0.99, …)` sobre o `rate(…_bucket{kind="lookup"}[5m])`), com pelo menos 100 LOOKUPs na janela | 5m |
+
+- Memória é o orçamento declarado, não o RSS: `process_resident_memory_bytes`
+  não é exportado, e o teto do processo é do cgroup. Com as marcas d'água
+  padrão (0,8 e 0,9), um cache cheio e saudável oscila entre 80% e 90%: o
+  alerta é de capacidade (`severity: warning`). Para avisar só quando o despejo
+  não dá conta, troque o limiar pela marca alta (0,9).
+- Latência por instância (`sum by (job, instance, le)`). Com menos de 100
+  LOOKUPs em 5 minutos o p99 é o máximo de poucas amostras: não alerta.
+- No CI, o job `alertas (promtool)` roda `promtool check rules` e
+  `promtool test rules` (`semantic-cache.rules.test.yml`: a série que dispara
+  e as que não podem), e o teste `the_alert_rules_only_cite_exported_metrics`
+  do servidor confere cada métrica, `kind` e `le` citados contra o `/metrics`.

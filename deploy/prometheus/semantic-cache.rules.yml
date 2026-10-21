@@ -1,0 +1,45 @@
+# Regras de alerta do semantic-cache (arquivo de regras do Prometheus, em
+# `rule_files`). As métricas são as do contrato da Fase 4
+# (docs/observability.md): o teste `the_alert_rules_only_cite_exported_metrics`
+# do servidor confere cada nome citado aqui contra o `/metrics`, e o
+# `semantic-cache.rules.test.yml` (promtool test rules) prova que cada regra
+# dispara com a série que deve e cala com a que não deve.
+groups:
+  - name: semantic-cache
+    rules:
+      # O orçamento declarado (`[memory]`), não o RSS: é o que o cache controla
+      # e despeja. Com as marcas d'água padrão (0,8 e 0,9), um cache cheio e
+      # saudável oscila entre 80% e 90%: acima de 85% por 10 minutos é cache
+      # cheio, aviso de capacidade.
+      - alert: SemanticCacheMemoryHigh
+        expr: semantic_cache_memory_bytes / semantic_cache_memory_limit_bytes > 0.85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Cache semântico acima de 85% do orçamento de memória
+          description: >-
+            {{ $labels.instance }} usa {{ $value | humanizePercentage }} do
+            orçamento de memória (memory.max_bytes) há mais de 10 minutos.
+
+      # p99 do LOOKUP acima de 3 ms. Com menos de 100 LOOKUPs na janela, o p99
+      # é o máximo de poucas amostras, e um pedido lento sozinho não alerta.
+      - alert: SemanticCacheLookupLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (job, instance, le) (
+              rate(semantic_cache_ipc_request_duration_seconds_bucket{kind="lookup"}[5m])
+            )
+          ) > 0.003
+          and on (job, instance)
+          sum by (job, instance) (
+            increase(semantic_cache_ipc_request_duration_seconds_count{kind="lookup"}[5m])
+          ) >= 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: p99 do LOOKUP do cache semântico acima de 3 ms
+          description: >-
+            {{ $labels.instance }} respondeu o LOOKUP com p99 de
+            {{ $value | humanizeDuration }} nos últimos 5 minutos.
