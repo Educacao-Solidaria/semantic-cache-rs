@@ -42,7 +42,7 @@ fn count(kind: &str, outcome: &str) -> u64 {
 #[tokio::test]
 async fn requests_connections_and_discarded_frames_are_counted() {
     let (dial, accepted) = mpsc::channel(4);
-    let idle = Duration::from_secs(1);
+    let idle = Duration::from_secs(2); // a janela para ver a conexão parada
     let limits = Limits {
         max_connections: 4,
         idle,

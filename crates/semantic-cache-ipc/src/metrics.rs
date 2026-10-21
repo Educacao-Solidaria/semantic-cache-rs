@@ -138,4 +138,12 @@ mod tests {
         let others = [0x00, LOOKUP_RESP, PONG, ERROR, 0xFF];
         assert!(others.iter().all(|&k| KINDS[kind_index(k)] == "unknown"));
     }
+
+    /// O único teste da lib que chama `lookup`: os outros não sujam a conta.
+    #[test]
+    fn a_lookup_counts_under_its_own_result() {
+        lookup(Lookup::Miss);
+        let counts: Vec<_> = lookups().collect();
+        assert_eq!(counts, [("hit", 0), ("miss", 1), ("error", 0)]);
+    }
 }
