@@ -105,10 +105,8 @@ impl Cache {
     fn store(&self, req: Req) -> Result<(u8, Vec<u8>), &'static str> {
         let text = req.response.as_ref().ok_or(code::BAD_REQUEST)?;
         let bytes = 4 * req.embedding.capacity() + text.capacity();
-        let paid = self
-            .budget
-            .try_reserve(bytes)
-            .map_err(|_| code::OVERLOADED)?;
+        let paid = self.budget.try_reserve(bytes);
+        let paid = paid.map_err(|_| code::OVERLOADED)?;
         let entry = Arc::new(Entry { req, paid });
         self.entries.update(|old| {
             let mut next = old.clone();
@@ -398,6 +396,9 @@ fn memory_stays_flat_under_continuous_vector_load() {
     println!("soak: - do 2º ao último quarto: heap fora do orçamento +{heap_kib} KiB, residente +{rss_kib} KiB");
     println!("soak: - no fim: orçamento {budget_left} B, heap +{left_kib} KiB sobre o de antes, {connections} conexões");
     assert!(warmed, "o cache não encheu no 1º quarto");
+    // Um orçamento que recusasse quase tudo mediria um cache parado.
+    let busy = rounds > 0 && refused * 100 <= rounds;
+    assert!(busy, "{refused} STORE recusados em {rounds} rodadas");
     assert!(heap <= HEAP_SLACK, "heap fora do orçamento +{heap} B");
     assert!(rss <= RSS_SLACK, "memória residente cresceu {rss} B");
     assert_eq!(connections, 0, "conexões abertas depois do serve");
