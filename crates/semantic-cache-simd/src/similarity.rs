@@ -48,8 +48,6 @@ impl std::error::Error for SimilarityError {}
 ///
 /// [`SimilarityError::DimensionMismatch`] se os comprimentos diferem.
 pub fn dot(a: &[f32], b: &[f32]) -> Result<f32, SimilarityError> {
-    // Temporário: regressão proposital para provar o portão no CI (revertida a seguir).
-    let _ = std::hint::black_box(Kernel::active().dot(a, b));
     Kernel::active().dot(a, b)
 }
 
