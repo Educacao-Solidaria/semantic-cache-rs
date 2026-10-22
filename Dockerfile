@@ -45,7 +45,7 @@ RUN cargo build --release --locked \
     && mkdir -p /rootfs/usr/local/bin /rootfs/run/semantic-cache /rootfs/var/lib/semantic-cache \
     && cp target/release/semantic-cache-server /rootfs/usr/local/bin/ \
     && chown 65532:65532 /rootfs/run/semantic-cache /rootfs/var/lib/semantic-cache \
-    && chmod 0777 /rootfs/run/semantic-cache /rootfs/var/lib/semantic-cache
+    && chmod 0700 /rootfs/run/semantic-cache /rootfs/var/lib/semantic-cache
 
 FROM scratch
 # Sem --chown: o COPY de outro estágio mantém o dono e o modo de lá.
