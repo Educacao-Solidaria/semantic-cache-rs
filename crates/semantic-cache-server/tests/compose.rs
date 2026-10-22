@@ -145,10 +145,13 @@ impl Compose {
 #[test]
 fn the_cache_runs_this_image_with_the_socket_and_the_data_on_named_volumes() {
     let compose = Compose::load();
-    // A imagem do Dockerfile da raiz, com o uid (65532) e o HEALTHCHECK dela.
+    // A imagem do Dockerfile da raiz, com o uid (65532), o ENTRYPOINT e o
+    // HEALTHCHECK dela (que nem está entre as chaves conhecidas).
     assert_eq!(compose.one("services.cache.build.context"), "../..");
     assert_eq!(compose.one("services.cache.image"), IMAGE);
-    assert_eq!(compose.get("services.cache.user"), None);
+    let own = compose.keys("services.cache");
+    let overridden = own.contains("user") || own.contains("entrypoint");
+    assert!(!overridden, "{own:?}");
     // Um nome de variável errado cairia no padrão (/tmp, sem API): a config
     // que o binário carrega é a medida.
     let config = compose.config("cache");

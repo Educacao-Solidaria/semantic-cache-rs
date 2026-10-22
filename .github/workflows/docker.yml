@@ -136,7 +136,8 @@ jobs:
           compose up --detach --wait --wait-timeout 60 --pull never --no-build cache
           # Pelo volume, como o outro container o vê: a pasta da imagem e o socket.
           ipc=$(docker volume inspect -f '{{.Mountpoint}}' semantic-cache_cache-ipc)
-          diff -u - <(sudo stat -c '%a %u:%g %F' "$ipc" "$ipc/semantic-cache.sock") <<'EOF'
+          sudo stat -c '%a %u:%g %F' "$ipc" "$ipc/semantic-cache.sock" | tee "$RUNNER_TEMP/ipc.txt"
+          diff -u - "$RUNNER_TEMP/ipc.txt" <<'EOF'
           700 65532:65532 directory
           600 65532:65532 socket
           EOF
@@ -145,9 +146,10 @@ jobs:
           # Outro uid, e root sem capabilities, não chegam ao socket.
           refused=true
           for user in 65533:65533 0:0; do
+            echo "--user $user"
             if compose run --rm -T --user "$user" ping > "$RUNNER_TEMP/ping.txt" 2>&1; then
               echo "::error::o uid $user conversou com o cache"; refused=false
-            elif ! grep -qF 'Permission denied (os error 13)' "$RUNNER_TEMP/ping.txt"; then
+            elif ! grep -F 'Permission denied (os error 13)' "$RUNNER_TEMP/ping.txt"; then
               cat "$RUNNER_TEMP/ping.txt"; echo "::error::o uid $user falhou por outro motivo"; refused=false
             fi
           done
