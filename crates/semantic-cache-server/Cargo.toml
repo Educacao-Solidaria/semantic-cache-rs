@@ -45,6 +45,8 @@ rkyv = "0.8"
 lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode", "safe-encode", "std"] }
 # Codec e servidor do IPC v1 (socket Unix; no Windows, named pipe).
 semantic-cache-ipc = { path = "../semantic-cache-ipc" }
+# A busca vetorial do soak (`tests/soak.rs`), com os kernels de produção.
+semantic-cache-simd = { path = "../semantic-cache-simd" }
 # `ServiceExt::oneshot` nos testes da API (já vem com o axum).
 tower = { version = "0.5", features = ["util"] }
 
@@ -100,6 +102,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+semantic-cache-simd = { workspace = true }
 tower = { workspace = true }
 
 # jemalloc não compila com o toolchain MSVC; lá o servidor fica no alocador
