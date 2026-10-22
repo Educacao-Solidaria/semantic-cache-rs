@@ -27,9 +27,11 @@ const UNREAD: &str = "YAML fora do que o teste lê";
 /// repete o caminho da lista.
 type Flat = Vec<(String, Option<String>)>;
 
-/// Lê só o YAML que o compose usa (mapa e lista em bloco, lista JSON numa
-/// linha). Âncora, mapa numa linha, bloco de texto, mapa dentro de lista e
-/// `chave:valor` sem espaço derrubam o teste em vez de serem lidos errado.
+/// Lê só o YAML que o compose usa: mapa e lista em bloco, e lista em fluxo de
+/// strings JSON (`["a", "b"]`), que vira itens como os da lista em bloco.
+/// Âncora, mapa numa linha, bloco de texto, mapa ou lista dentro de lista,
+/// lista na indentação da chave (`k:\n- v`) e `chave:valor` sem espaço
+/// derrubam o teste em vez de serem lidos errado.
 fn flat(yaml: &str) -> Flat {
     let odd = |value: &str| value.starts_with(['&', '*', '{', '|', '>', '!']);
     let unquote = |value: &str| {
@@ -44,11 +46,16 @@ fn flat(yaml: &str) -> Flat {
             continue;
         }
         let indent = line.len() - text.len();
+        let mut closed = None;
         while open.last().is_some_and(|&(at, _)| at >= indent) {
-            open.pop();
+            closed = open.pop().map(|(at, _)| at);
         }
         let mut path: Vec<&str> = open.iter().map(|&(_, key)| key).collect();
         if let Some(item) = text.strip_prefix("- ") {
+            // Item na indentação da chave que abriu a lista cairia no pai dela.
+            let nested = item.starts_with('[') || item.starts_with("- ");
+            let misread = closed == Some(indent) || nested;
+            assert!(!misread, "{UNREAD}: {line}");
             assert!(!odd(item) && !item.contains(": "), "{UNREAD}: {line}");
             flat.push((path.join("."), Some(unquote(item))));
             continue;
@@ -59,10 +66,17 @@ fn flat(yaml: &str) -> Flat {
         let value = value.trim();
         assert!(key != "<<" && !odd(value), "{UNREAD}: {line}");
         path.push(key);
+        let at = path.join(".");
+        if value.starts_with('[') {
+            let items: Result<Vec<String>, _> = serde_json::from_str(value);
+            let items = items.unwrap_or_else(|_| panic!("{UNREAD}: {line}"));
+            flat.extend(items.into_iter().map(|item| (at.clone(), Some(item))));
+            continue;
+        }
         if value.is_empty() {
             open.push((indent, key));
         }
-        flat.push((path.join("."), (!value.is_empty()).then(|| unquote(value))));
+        flat.push((at, (!value.is_empty()).then(|| unquote(value))));
     }
     flat
 }
@@ -88,7 +102,13 @@ struct Compose(Flat);
 
 impl Compose {
     fn load() -> Self {
-        Self(flat(COMPOSE))
+        let compose = Self(flat(COMPOSE));
+        // `include:` e afins trariam serviços que estes testes não veem.
+        let paths = compose.0.iter().map(|(at, _)| at.as_str());
+        let top: BTreeSet<_> = paths.map(|at| at.split('.').next().unwrap()).collect();
+        let known = BTreeSet::from(["name", "networks", "services", "volumes"]);
+        assert_eq!(top, known);
+        compose
     }
 
     /// Os valores em `path`, na ordem (uma lista dá vários).
@@ -185,9 +205,8 @@ fn whoever_shares_the_socket_volume_reads_it_only_and_runs_as_65532() {
     // O PING do HEALTHCHECK, de outro container e sem rede: só o volume liga.
     assert_eq!(compose.one("services.ping.image"), IMAGE);
     assert_eq!(compose.config("ping").ipc.socket_path, Path::new(SOCKET));
-    let entrypoint = compose.one("services.ping.entrypoint");
-    let entrypoint: Vec<String> = serde_json::from_str(entrypoint).unwrap();
-    assert_eq!(entrypoint, [binary(), "--ping".to_owned()]);
+    let entrypoint = compose.all("services.ping.entrypoint");
+    assert_eq!(entrypoint, [binary().as_str(), "--ping"]);
     assert_eq!(compose.one("services.ping.network_mode"), "none");
     let condition = compose.one("services.ping.depends_on.cache.condition");
     assert_eq!(condition, "service_healthy");
@@ -226,6 +245,9 @@ fn no_service_keeps_privileges_publishes_ports_or_carries_secrets() {
         let off_host = matches!(network, None | Some("none"));
         assert!(off_host, "{service}: {network:?}");
         // Segredo só pelo `.env` do compose do ecossistema, nunca escrito aqui.
+        // Em lista (`- VAR=valor`), o nome escaparia daqui e da `config`.
+        let in_list = compose.all(&at("environment"));
+        assert!(in_list.is_empty(), "{service}: environment em lista");
         for var in compose.keys(&at("environment")) {
             let upper = var.to_ascii_uppercase();
             let secret = SECRETS.iter().any(|s| upper.contains(s));
@@ -238,10 +260,13 @@ fn no_service_keeps_privileges_publishes_ports_or_carries_secrets() {
 fn the_reader_refuses_the_yaml_it_would_misread() {
     let odd = ["a: &x 1", "a: *x", "<<:\n  a: 1", "a: {b: 1}", "a: |"];
     let also = ["a: >-", "- b: 1", "---", "a:b"];
-    for yaml in odd.into_iter().chain(also) {
+    let lists = ["a:\n- b", "a: [b]", "a: [1]", "- [\"b\"]", "- - b"];
+    for yaml in odd.into_iter().chain(also).chain(lists) {
         assert!(std::panic::catch_unwind(|| flat(yaml)).is_err(), "{yaml}");
     }
-    let read = Compose(flat("a:\n  b: \"1:2\"\n  c:\n    - x:/y:ro\n  # d: 1\n"));
+    let yaml = "a:\n  b: \"1:2\"\n  c:\n    - x:/y:ro\n  # d: 1\n  e: [\"p\", \"q\"]\n";
+    let read = Compose(flat(yaml));
     assert_eq!((read.one("a.b"), read.all("a.c")), ("1:2", vec!["x:/y:ro"]));
-    assert_eq!(read.keys("a"), BTreeSet::from(["b", "c"]));
+    assert_eq!(read.all("a.e"), ["p", "q"]);
+    assert_eq!(read.keys("a"), BTreeSet::from(["b", "c", "e"]));
 }
