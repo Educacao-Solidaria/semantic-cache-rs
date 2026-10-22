@@ -1,0 +1,60 @@
+name: pgo
+
+# PGO do caminho quente (crates/semantic-cache-testkit/scripts/pgo.sh): perfil do
+# bench `ipc`, recompilação com ele e medição base × PGO no mesmo job. Sob demanda,
+# e em PR que mexe no próprio pipeline: o `workflow_dispatch` só aparece depois que
+# este arquivo chega na main, e um script quebrado não esperaria a próxima rodada
+# manual para aparecer. Nenhum outro job lê perfil: o build padrão não depende dele.
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: Rodadas intercaladas de medição (1 a 99)
+        type: number
+        default: 5
+  pull_request:
+    paths:
+      - .github/workflows/pgo.yml
+      - crates/semantic-cache-testkit/scripts/pgo*
+      - crates/semantic-cache-testkit/benches/ipc.rs
+
+concurrency:
+  group: pgo-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pgo:
+    name: pgo (bench ipc)
+    runs-on: ubuntu-latest
+    # Três builds com LTO gordo e sem cache (cada um com as próprias RUSTFLAGS),
+    # mais o treino e as rodadas; isto só corta um travamento do runner.
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: crates/semantic-cache-testkit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - name: perfil, recompilação e medição
+        env:
+          # Cru, sem `|| 5`: um 0 viraria 5 calado. Vazio (em PR), o script usa 5;
+          # fora de 1 a 99, ele recusa.
+          ROUNDS: ${{ inputs.rounds }}
+        run: scripts/pgo.sh "$ROUNDS"
+      - name: resumo
+        run: cat target/pgo/relatorio.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Por tentativa: re-rodar o job com o mesmo nome dá 409 no upload v4.
+          name: pgo-${{ github.run_attempt }}
+          path: |
+            crates/semantic-cache-testkit/target/pgo/ipc.profdata
+            crates/semantic-cache-testkit/target/pgo/treino.txt
+            crates/semantic-cache-testkit/target/pgo/runs/
+            crates/semantic-cache-testkit/target/pgo/relatorio.md
