@@ -1,0 +1,65 @@
+# O cache em container, com o socket IPC num volume nomeado que outro container
+# monta (contrato da Fase 5, §3 e §4). O compose do ecossistema (flow-gateway-go,
+# deploy/compose/) monta o mesmo volume no gateway; aqui o lado dele é o serviço
+# `ping`, com o uid do gateway. Da raiz do repositório:
+#   docker compose -f deploy/compose/compose.yaml up -d --wait cache
+#   docker compose -f deploy/compose/compose.yaml run --rm ping
+# O job da imagem (.github/workflows/docker.yml) sobe isto e confere quem fala
+# pelo socket; crates/semantic-cache-server/tests/compose.rs confere o arquivo.
+name: semantic-cache
+
+services:
+  cache:
+    build:
+      context: ../..
+    image: educacao-solidaria/semantic-cache:dev
+    # Da imagem: o uid 65532, os caminhos do socket e da persistência e o
+    # HEALTHCHECK (um PING pelo socket). A API HTTP de depuração fica na rede
+    # interna, sem porta no host (fora do loopback não há filtro de Host).
+    environment:
+      SEMCACHE_HTTP_ENABLED: "true"
+      SEMCACHE_HTTP_LISTEN: 0.0.0.0:8099
+    # Volume novo herda o dono e o modo da pasta da imagem (65532, 0700), e o
+    # servidor cria o socket 0600 dentro dela.
+    volumes:
+      - cache-ipc:/run/semantic-cache
+      - cache-data:/var/lib/semantic-cache
+    networks:
+      - internal
+    # Só escreve nos volumes e não precisa de capability (8099 não é privilegiada).
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # O lado do gateway: o uid dele (65532, o mesmo do cache), o volume só para
+  # leitura (não troca nem apaga o socket) e sem rede, porque o IPC é o socket.
+  # Outro uid nem atravessa a pasta 0700. Root com as capabilities padrão do
+  # Docker atravessaria (DAC_OVERRIDE): por isso nenhum serviço fica com elas, e
+  # o volume só vai para quem fala com o cache.
+  ping:
+    image: educacao-solidaria/semantic-cache:dev
+    profiles:
+      - probe
+    user: "65532:65532"
+    entrypoint: ["/usr/local/bin/semantic-cache-server", "--ping"]
+    volumes:
+      - cache-ipc:/run/semantic-cache:ro
+    network_mode: none
+    depends_on:
+      cache:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  cache-ipc:
+  cache-data:
+
+networks:
+  internal:
+    internal: true
