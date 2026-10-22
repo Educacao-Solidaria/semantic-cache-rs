@@ -54,8 +54,10 @@ jobs:
           cache-to: type=gha,scope=semantic-cache,mode=max
       - name: tamanho, usuário e conteúdo
         run: |
+          # Com o image store do containerd, o `.Size` é o comprimido; a soma
+          # da camada (abaixo) é o descomprimido. Os dois ficam sob 15 MB.
           size=$(docker image inspect -f '{{.Size}}' "$IMAGE")
-          echo "tamanho: $size bytes"
+          echo "docker image inspect: $size bytes"
           test "$size" -lt 15000000
           test "$(docker image inspect -f '{{.Config.User}}' "$IMAGE")" = 65532:65532
           docker run --rm "$IMAGE" --version | tee "$RUNNER_TEMP/version.txt"
@@ -66,8 +68,11 @@ jobs:
           docker save "$IMAGE" | tar -x -C "$RUNNER_TEMP/image"
           mapfile -t layers < <(jq -r '.[0].Layers[]' "$RUNNER_TEMP/image/manifest.json")
           test "${#layers[@]}" -eq 1
-          tar -tvf "$RUNNER_TEMP/image/${layers[0]}" --numeric-owner \
-            | awk '$NF != "./" {print $1, $2, $NF}' | LC_ALL=C sort > "$RUNNER_TEMP/layer.txt"
+          tar -tvf "$RUNNER_TEMP/image/${layers[0]}" --numeric-owner > "$RUNNER_TEMP/tar.txt"
+          unpacked=$(awk '{s += $3} END {print s}' "$RUNNER_TEMP/tar.txt")
+          echo "camada descomprimida: $unpacked bytes"
+          test "$unpacked" -lt 15000000
+          awk '$NF != "./" {print $1, $2, $NF}' "$RUNNER_TEMP/tar.txt" | LC_ALL=C sort > "$RUNNER_TEMP/layer.txt"
           diff -u - "$RUNNER_TEMP/layer.txt" <<'EOF'
           -rwxr-xr-x 0/0 usr/local/bin/semantic-cache-server
           drwx------ 65532/65532 run/semantic-cache/

@@ -17,3 +17,6 @@
 **/node_modules
 **/.venv
 **/rust-toolchain.toml
+# Os testes não entram no binário, e um arquivo novo neles mudaria a receita do
+# cargo-chef (que lista os alvos), refazendo a camada das dependências à toa.
+**/tests

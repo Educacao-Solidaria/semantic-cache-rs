@@ -102,6 +102,9 @@ async fn binary_clears_a_dead_socket_refuses_a_twin_and_removes_its_own() {
             conn.write_all(&answer).unwrap();
         });
         assert_eq!(probe(&socket), passes, "{case}");
+        // Uma sonda que nem conectou deixaria o `accept` preso: esta conexão o
+        // solta, e o servidor de mentira falha no `read_exact` em vez de travar.
+        let _ = std::os::unix::net::UnixStream::connect(&socket);
         fake.join().unwrap();
         std::fs::remove_file(&socket).unwrap();
     }
