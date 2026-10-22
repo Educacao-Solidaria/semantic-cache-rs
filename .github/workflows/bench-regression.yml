@@ -41,7 +41,7 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: fat
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # O merge do PR e os pais dele: o 1º é a base em que o PR vai entrar.
           fetch-depth: 2
