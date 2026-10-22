@@ -235,36 +235,38 @@ fn clock(save: bool) {
     criterion.final_summary();
 }
 
-/// Os argumentos → `Ok(false)` se o portão achou regressão.
-fn dispatch(args: &[&str]) -> Result<bool, String> {
-    match *args {
+/// Os argumentos, com `measure` no portão → o código de saída que o workflow lê:
+/// 0 ok, 1 regressão, 2 erro (o motivo vai para o stderr).
+fn dispatch(args: &[&str], measure: &dyn Fn(&Path, &str, u64) -> Measured) -> u8 {
+    let verdict = match *args {
         ["run", name, iters] => match iters.parse() {
             Ok(iters) if iters > 0 => run(name, iters).map(|()| true),
             _ => Err(format!("iterações: inteiro positivo, não {iters:?}")),
         },
-        ["count", base, pr] => {
-            let (table, ok) = gate(&cachegrind, Path::new(base), Path::new(pr))?;
+        ["count", base, pr] => gate(measure, Path::new(base), Path::new(pr)).map(|(table, ok)| {
             print!("{table}");
-            Ok(ok)
-        }
+            ok
+        }),
         ["clock", mode @ ("save" | "compare")] => {
             clock(mode == "save");
             Ok(true)
         }
         _ => Err("uso: run <caso> <iterações> | count <base> <pr> | clock save|compare".into()),
+    };
+    match verdict {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(message) => {
+            eprintln!("bench-regression: {message}");
+            2
+        }
     }
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    match dispatch(&args.iter().map(String::as_str).collect::<Vec<_>>()) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
-        Err(message) => {
-            eprintln!("bench-regression: {message}");
-            ExitCode::from(2)
-        }
-    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    ExitCode::from(dispatch(&args, &cachegrind))
 }
 
 #[cfg(test)]
@@ -275,7 +277,7 @@ mod tests {
     fn every_case_runs_and_has_its_own_name() {
         for (name, n) in CASES {
             assert!(n > 0, "{name}");
-            assert_eq!(dispatch(&["run", name, "2"]), Ok(true), "{name}");
+            assert_eq!(dispatch(&["run", name, "2"], &cachegrind), 0, "{name}");
         }
         let mut names = CASES.map(|(name, _)| name);
         names.sort_unstable();
@@ -293,7 +295,7 @@ mod tests {
             &["clock", "replay"],
         ];
         for args in bad {
-            assert!(dispatch(args).is_err(), "{args:?}");
+            assert_eq!(dispatch(args, &cachegrind), 2, "{args:?}");
         }
     }
 
@@ -341,6 +343,11 @@ mod tests {
         assert!(gate(&fake("lookup_i8", 1_050), base, pr).unwrap().1);
         let (table, ok) = gate(&fake("quantize", 700), base, pr).unwrap();
         assert!(ok && table.contains("| 700.0 | -30.00% | ok |"), "{table}");
+
+        // A saída que o workflow lê, com a regressão no 1º caso (não só no último).
+        let count = ["count", "base", "pr"];
+        assert_eq!(dispatch(&count, &fake("dot_f32", 1_051)), 1);
+        assert_eq!(dispatch(&count, &fake("dot_f32", 1_050)), 0);
     }
 
     #[test]
