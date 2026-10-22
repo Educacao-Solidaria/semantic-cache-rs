@@ -3,10 +3,10 @@
 # Cada arquivo é a saída de uma rodada, <base|pgo>-<rodada>.txt. De cada linha da
 # tabela do bench saem o p50 de ponta a ponta e o p50 no servidor; em cada rodada,
 # Δ = (pgo − base) / base. Sai a mediana dos p50 de cada versão e a dos Δ, com o
-# número de rodadas em que o PGO foi mais rápido (uma rodada perturbada não move
-# a mediana nem a contagem; moveria uma faixa). Linha faltando ou repetida, número
-# ilegível e rodada incompleta são erro (saída 1, nada no stdout), nunca uma
-# tabela pela metade. Só awk POSIX.
+# número de rodadas em que o PGO foi mais rápido: uma rodada perturbada pesa uma
+# posição na mediana e 1 na contagem, e numa faixa mín–máx decidiria sozinha.
+# Linha faltando ou repetida, número ilegível e rodada incompleta são erro (saída
+# 1, nada no stdout), nunca uma tabela pela metade. Só awk POSIX.
 # O LC_ALL=C é obrigatório: o mawk lê e escreve número pelo LC_NUMERIC, e em pt_BR
 # "0.084" vira 0 sem erro nenhum (o BEGIN recusa).
 

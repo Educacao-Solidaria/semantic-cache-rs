@@ -42,7 +42,9 @@ jobs:
           components: llvm-tools
       - name: perfil, recompilação e medição
         env:
-          ROUNDS: ${{ inputs.rounds || 5 }}
+          # Cru, sem `|| 5`: um 0 viraria 5 calado. Vazio (em PR), o script usa 5;
+          # fora de 1 a 99, ele recusa.
+          ROUNDS: ${{ inputs.rounds }}
         run: scripts/pgo.sh "$ROUNDS"
       - name: resumo
         run: cat target/pgo/relatorio.md >> "$GITHUB_STEP_SUMMARY"
