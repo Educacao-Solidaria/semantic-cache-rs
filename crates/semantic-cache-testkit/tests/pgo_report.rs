@@ -1,7 +1,7 @@
 //! O relatório do `scripts/pgo.sh` (`scripts/pgo-report.awk`) sobre saídas
 //! sintéticas do bench `ipc`: mediana de cada versão, Δ pareado por rodada com
 //! a contagem das rodadas em que o PGO ganhou, e erro (sem tabela pela metade)
-//! quando falta linha, rodada ou número.
+//! quando falta linha, rodada ou número. E a guarda de rodadas do script.
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -61,19 +61,38 @@ fn rows(table: &str) -> Vec<&str> {
 
 #[test]
 fn each_round_is_paired_and_the_delta_is_not_the_ratio_of_the_medians() {
-    // Δ por rodada: −10%, +10% e −20% → mediana −10%, mais rápido em 2 de 3; a
-    // razão das medianas daria +10%.
+    // Δ por rodada: +100%, −50% e −10% → mediana −10%, mais rápido em 2 de 3. A
+    // razão das medianas (0,2 → 0,2) e o pareamento depois de ordenar dariam 0%;
+    // a mediana sem ordenar, −50%. No servidor, a rodada de base 0 fica fora do
+    // Δ e da contagem.
     let key = "flat_f32 | 1000";
     let files = [
-        round(1, &row(key, (0.1, 0.05)), &row(key, (0.09, 0.04))),
-        round(2, &row(key, (0.2, 0.05)), &row(key, (0.22, 0.04))),
-        round(3, &row(key, (0.3, 0.05)), &row(key, (0.24, 0.04))),
+        round(1, &row(key, (0.1, 0.05)), &row(key, (0.2, 0.04))),
+        round(2, &row(key, (0.2, 0.0)), &row(key, (0.1, 0.01))),
+        round(3, &row(key, (0.3, 0.05)), &row(key, (0.27, 0.04))),
     ]
     .concat();
     assert_eq!(
         rows(&report("paired", 3, &files).unwrap()),
-        ["| flat_f32 | 1000 | 0.200 → 0.220 ms | -10.0% (2/3) | 0.050 → 0.040 ms | -20.0% (3/3) |"]
+        ["| flat_f32 | 1000 | 0.200 → 0.200 ms | -10.0% (2/3) | 0.050 → 0.040 ms | -20.0% (2/2) |"]
     );
+}
+
+#[test]
+fn the_script_refuses_a_bad_round_count_before_anything_else() {
+    // Sem cargo nem rustc no PATH, uma guarda furada para no `rustc -vV` (127),
+    // nunca no pipeline. O pt_BR, onde estiver instalado, é o caso do ³ e do ٣:
+    // fora do locale C, o `[1-9]` do bash os aceita.
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/pgo.sh");
+    for rounds in ["0", "100", "05", " 5", "-1", "1;id", "abc", "³", "٣"] {
+        let out = Command::new("bash")
+            .args([script, rounds])
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "pt_BR.UTF-8")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{rounds:?}");
+    }
 }
 
 #[test]

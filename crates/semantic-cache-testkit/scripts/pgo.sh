@@ -20,6 +20,9 @@
 # LOOKUP (o despachante é o PR 52/100); quando fizer, o treino passa a ser uma
 # carga de cliente no socket dele, com estes mesmos passos.
 set -euo pipefail
+# Locale C no script inteiro: em pt_BR o `[1-9]` do bash aceita ³, ½ e dígitos de
+# outras escritas (passariam pela guarda), e o mawk lê "0.084" como 0 (pgo-report.awk).
+export LC_ALL=C
 cd "$(dirname "$0")/.."
 rounds=${1:-5}
 [[ $rounds =~ ^[1-9][0-9]?$ ]] || { echo "uso: $0 [rodadas, de 1 a 99]" >&2; exit 2; }
@@ -47,13 +50,18 @@ LLVM_PROFILE_FILE="$out/raw/%p.profraw" "$out/ipc-gen" --bench >"$out/treino.txt
 "$profdata" merge -o "$out/ipc.profdata" "$out/raw"
 build ipc-base
 build ipc-pgo "-Cprofile-use=$out/ipc.profdata"
+# Um perfil que não muda nada mediria a base contra ela mesma, sem erro nenhum.
+if cmp -s "$out/ipc-base" "$out/ipc-pgo"; then
+  echo "o binário com perfil saiu idêntico à base: o -Cprofile-use não teve efeito" >&2
+  exit 1
+fi
 for r in $(seq "$rounds"); do
   # A ordem alterna (ABBA): a deriva da máquina não pesa sempre do mesmo lado.
   order=(base pgo)
   ((r % 2)) || order=(pgo base)
   for v in "${order[@]}"; do "$out/ipc-$v" --bench >"$out/runs/$v-$r.txt"; done
 done
-report=$(LC_ALL=C awk -v expect="$rounds" -f scripts/pgo-report.awk "$out"/runs/*.txt)
+report=$(awk -v expect="$rounds" -f scripts/pgo-report.awk "$out"/runs/*.txt)
 {
   echo "PGO do bench \`ipc\`, $rounds rodadas intercaladas: $(head -1 "$out/runs/base-1.txt")."
   echo "Δ = (PGO − base) / base em cada rodada (negativo = PGO mais rápido): a mediana e, entre"
