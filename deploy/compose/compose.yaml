@@ -45,7 +45,7 @@ services:
     user: "65532:65532"
     entrypoint: ["/usr/local/bin/semantic-cache-server", "--ping"]
     volumes:
-      - cache-data:/run/semantic-cache:ro
+      - cache-ipc:/run/semantic-cache:ro
     network_mode: none
     depends_on:
       cache:
