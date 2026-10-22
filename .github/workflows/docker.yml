@@ -145,7 +145,7 @@ jobs:
           compose run --rm -T ping
           # Outro uid, e root sem capabilities, não chegam ao socket.
           refused=true
-          for user in 65533:65533 0:0; do
+          for user in 65532:65532 65533:65533 0:0; do
             echo "--user $user"
             if compose run --rm -T --user "$user" ping > "$RUNNER_TEMP/ping.txt" 2>&1; then
               echo "::error::o uid $user conversou com o cache"; refused=false
