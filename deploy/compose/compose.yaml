@@ -13,6 +13,7 @@ services:
     build:
       context: ../..
     image: educacao-solidaria/semantic-cache:dev
+    user: "65532:65533"
     # Da imagem: o uid 65532, os caminhos do socket e da persistência e o
     # HEALTHCHECK (um PING pelo socket). A API HTTP de depuração fica na rede
     # interna, sem porta no host (fora do loopback não há filtro de Host).
