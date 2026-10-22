@@ -5,8 +5,9 @@
 //! - `count <base> <pr>`, o portão: instruções por iteração de cada caso nos dois
 //!   binários, no cachegrind do valgrind; a rodada de 2N iterações menos a de N
 //!   tira a partida do processo e a montagem do caso. Algum caso mais de 5% acima
-//!   da base → saída 1. A contagem é determinística; o relógio de um runner
-//!   compartilhado varia mais que 5% entre execuções.
+//!   da base → saída 1. A conta não muda entre execuções (nos LOOKUPs, até 0,01%:
+//!   a resposta leva o `latency_micros` medido); o relógio de um runner
+//!   compartilhado varia mais que 5%.
 //! - `clock save` (base) e `clock compare` (PR), o relatório: tempo de relógio
 //!   pelo criterion contra a baseline `base` em `$CRITERION_HOME`, com intervalo
 //!   de confiança de 95%. Não decide nada.
@@ -15,8 +16,9 @@
 //! Local, com o valgrind no PATH: compile este binário na base e no PR com o
 //! profile do servidor (`CARGO_PROFILE_RELEASE_LTO=fat`,
 //! `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`, `cargo build --release --bin
-//! bench-regression`) e rode `bench-regression count <base> <pr>`. Saída: 0 ok,
-//! 1 regressão, 2 erro.
+//! bench-regression`) e rode `bench-regression count <base> <pr>`, com os dois
+//! caminhos do mesmo tamanho: o `argv[0]` entra no heap e muda o alinhamento dos
+//! dados (0,15% no `quantize`). Saída: 0 ok, 1 regressão, 2 erro.
 
 use std::fmt::Write as _;
 use std::hint::black_box;

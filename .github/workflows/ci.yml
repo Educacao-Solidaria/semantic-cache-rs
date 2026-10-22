@@ -101,7 +101,7 @@ jobs:
           workspaces: crates/semantic-cache-testkit -> target
       # Compila no profile `bench` (otimizado), sem medir: o relógio de um runner
       # compartilhado não dá número confiável. A regressão de cada PR é medida em
-      # instruções, que não variam, no bench-regression.yml.
+      # contagem de instruções, no bench-regression.yml.
       - name: cargo bench --no-run
         run: cargo bench --no-run --locked
 

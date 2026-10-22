@@ -5,8 +5,9 @@ name: bench-regression
 # quente do LOOKUP medidos na base (1º pai do merge do PR) e no PR, no mesmo job.
 # A base compila o harness DESTE PR (os dois lados medem o mesmo trabalho), e os
 # dois saem com o profile release do servidor.
-# - Portão: instruções por iteração no cachegrind do valgrind, que não variam
-#   entre execuções; algum caso mais de 5% acima da base falha o job.
+# - Portão: instruções por iteração no cachegrind do valgrind (o mesmo binário dá a
+#   mesma conta; nos LOOKUPs, até 0,01% de diferença); algum caso mais de 5% acima
+#   da base falha o job.
 # - Relatório: tempo de relógio pelo criterion, com intervalo de confiança; não
 #   decide (o relógio de um runner compartilhado varia mais que 5%).
 # A label `bench-ok` aceita uma regressão justificada, com o motivo registrado no
@@ -26,9 +27,13 @@ jobs:
   bench:
     name: regressão de desempenho (instruções, até 5%)
     runs-on: ubuntu-latest
-    # Dois builds com LTO gordo e sem cache, o valgrind e o criterion (uns 6 min
+    # Dois builds com LTO gordo e sem cache, o valgrind e o criterion (uns 4 min
     # no total); isto só corta um travamento do runner.
     timeout-minutes: 30
+    defaults:
+      run:
+        # Explícito: só assim o bash do Actions roda com `pipefail`.
+        shell: bash
     env:
       ACCEPT: ${{ contains(github.event.pull_request.labels.*.name, 'bench-ok') }}
       HARNESS: crates/semantic-cache-testkit/src/bin/bench-regression.rs
@@ -81,6 +86,8 @@ jobs:
           esac
       - name: relatório (tempo de relógio)
         if: ${{ !cancelled() }}
+        # Não decide: se o criterion falhar, o passo fica vermelho e o job não.
+        continue-on-error: true
         working-directory: ${{ runner.temp }}
         run: |
           [ -x bench-base ] && [ -x bench-head ] || exit 0
