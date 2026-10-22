@@ -53,6 +53,7 @@ COPY --from=build /rootfs/ /
 USER 65532:65532
 ENV SEMCACHE_IPC_SOCKET_PATH=/run/semantic-cache/semantic-cache.sock
 ENV SEMCACHE_PERSISTENCE_PATH=/var/lib/semantic-cache
+ENV SEMCACHE_LOG_LEVEL=info,=[bad
 # API HTTP de depuração: desligada por padrão; o compose a liga em 0.0.0.0:8099,
 # só na rede interna.
 EXPOSE 8099
