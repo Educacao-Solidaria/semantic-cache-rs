@@ -1,8 +1,9 @@
 name: Docker
 
 # A imagem do servidor (Dockerfile na raiz): build com o cache do Buildx no
-# cache do Actions, conteúdo conferido entrada por entrada e o container de pé
-# como no compose. Nada é publicado: a imagem só existe no runner.
+# cache do Actions, conteúdo conferido entrada por entrada, o container de pé e
+# o compose (deploy/compose/) com o socket falado de outro container. Nada é
+# publicado: a imagem só existe no runner.
 on:
   push:
     branches: [main]
@@ -29,6 +30,9 @@ jobs:
       # hadolint da release oficial, fixado; o sha256 é o do checksums.sha256 dela.
       HADOLINT_VERSION: 2.15.1
       HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+      # O cliente UDS do gateway (flow-gateway-go, público) no mesmo sha do job
+      # e2e do ci.yml.
+      GATEWAY_SHA: 9e51bc213b077002240744a9ca52f81477bc7d22
     steps:
       - uses: actions/checkout@v4
       - name: hadolint
@@ -106,3 +110,58 @@ jobs:
           # SIGTERM no PID 1: o servidor drena e sai com 0.
           docker stop -t 10 cache
           test "$(docker inspect -f '{{.State.ExitCode}}' cache)" = 0
+      # O cliente do gateway (internal/udscache), estático: `internal/` só se
+      # importa de dentro do módulo, então o probe entra no checkout dele.
+      - uses: actions/checkout@v4
+        with:
+          repository: Educacao-Solidaria/flow-gateway-go
+          ref: ${{ env.GATEWAY_SHA }}
+          path: gateway
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache-dependency-path: gateway/go.sum
+      - name: cliente Go do gateway
+        working-directory: gateway
+        run: |
+          mkdir cmd/gateway-probe
+          cp ../crates/semantic-cache-testkit/gateway-e2e/probe/main.go cmd/gateway-probe/
+          test -z "$(gofmt -l cmd/gateway-probe | tee /dev/stderr)"
+          go vet ./cmd/gateway-probe/
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/gateway-probe" ./cmd/gateway-probe
+      - name: compose, socket entre containers
+        run: |
+          compose() { docker compose -f deploy/compose/compose.yaml "$@"; }
+          compose up --detach --wait --wait-timeout 60 --pull never --no-build cache
+          # Pelo volume, como o outro container o vê: a pasta da imagem e o socket.
+          ipc=$(docker volume inspect -f '{{.Mountpoint}}' semantic-cache_cache-ipc)
+          diff -u - <(sudo stat -c '%a %u:%g %F' "$ipc" "$ipc/semantic-cache.sock") <<'EOF'
+          700 65532:65532 directory
+          600 65532:65532 socket
+          EOF
+          # PING de outro container, com o uid 65532 e sem rede: só o volume liga.
+          compose run --rm -T ping
+          # Outro uid, e root sem capabilities, não chegam ao socket.
+          refused=true
+          for user in 65533:65533 0:0; do
+            if compose run --rm -T --user "$user" ping > "$RUNNER_TEMP/ping.txt" 2>&1; then
+              echo "::error::o uid $user conversou com o cache"; refused=false
+            elif ! grep -qF 'Permission denied (os error 13)' "$RUNNER_TEMP/ping.txt"; then
+              cat "$RUNNER_TEMP/ping.txt"; echo "::error::o uid $user falhou por outro motivo"; refused=false
+            fi
+          done
+          test "$refused" = true
+          # O cliente do gateway no lugar do PING: STATS com o dono do socket e
+          # o processo do outro lado conferidos (Lstat e SO_PEERCRED); esperando
+          # outro dono, ele mesmo recusa (saída 2, ErrUntrustedSocket).
+          gateway() {
+            compose run --rm -T --entrypoint /usr/local/bin/gateway-probe \
+              -v "$RUNNER_TEMP/gateway-probe:/usr/local/bin/gateway-probe:ro" \
+              -e FLOW_CACHE_SOCKET_PATH=/run/semantic-cache/semantic-cache.sock \
+              -e "FLOW_CACHE_SOCKET_OWNER_UID=$1" ping
+          }
+          gateway 65532
+          status=0
+          gateway 65533 || status=$?
+          test "$status" = 2
