@@ -1,0 +1,22 @@
+# Contexto do build da imagem (Dockerfile na raiz): só o que o binário do
+# servidor compila. Tudo fica de fora, e volta o necessário; path dep novo no
+# servidor entra aqui e no estágio `build` do Dockerfile.
+*
+!Cargo.toml
+!src
+!crates/semantic-cache-ipc
+!crates/semantic-cache-simd
+!crates/semantic-cache-server
+# Nunca entram, nem dentro do que voltou: build local, segredo, dependência de
+# outra linguagem e o rust-toolchain.toml (o Rust do build é o da imagem base,
+# fixada por digest; o canal `stable` do arquivo faria o rustup baixar outro).
+**/.git
+**/target
+**/.env
+**/.env.*
+**/node_modules
+**/.venv
+**/rust-toolchain.toml
+# Os testes não entram no binário, e um arquivo novo neles mudaria a receita do
+# cargo-chef (que lista os alvos), refazendo a camada das dependências à toa.
+**/tests
