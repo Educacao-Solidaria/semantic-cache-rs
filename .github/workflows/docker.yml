@@ -1,0 +1,103 @@
+name: Docker
+
+# A imagem do servidor (Dockerfile na raiz): build com o cache do Buildx no
+# cache do Actions, conteúdo conferido entrada por entrada e o container de pé
+# como no compose. Nada é publicado: a imagem só existe no runner.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: imagem (scratch, musl)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # bash com pipefail (sem `shell:`, o Actions roda `bash -e` sem ele).
+    defaults:
+      run:
+        shell: bash
+    env:
+      IMAGE: educacao-solidaria/semantic-cache:dev
+      # hadolint da release oficial, fixado; o sha256 é o do checksums.sha256 dela.
+      HADOLINT_VERSION: 2.15.1
+      HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+    steps:
+      - uses: actions/checkout@v4
+      - name: hadolint
+        run: |
+          base="https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/hadolint" "$base/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  $RUNNER_TEMP/hadolint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/hadolint"
+          "$RUNNER_TEMP/hadolint" Dockerfile
+      - uses: docker/setup-buildx-action@v4
+      # Cache inteiro (mode=max): a camada que importa, a das dependências
+      # compiladas pelo cargo-chef, é de um estágio intermediário.
+      - name: build
+        uses: docker/build-push-action@v7
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          load: true
+          provenance: false
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=semantic-cache
+          cache-to: type=gha,scope=semantic-cache,mode=max
+      - name: tamanho, usuário e conteúdo
+        run: |
+          size=$(docker image inspect -f '{{.Size}}' "$IMAGE")
+          echo "tamanho: $size bytes"
+          test "$size" -lt 15000000
+          test "$(docker image inspect -f '{{.Config.User}}' "$IMAGE")" = 65532:65532
+          docker run --rm "$IMAGE" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -qF '(release, x86_64-linux)' "$RUNNER_TEMP/version.txt"
+          # Uma camada só, conferida entrada por entrada (modo, dono, caminho):
+          # sem shell e sem nada além do binário e das pastas do serviço.
+          mkdir "$RUNNER_TEMP/image"
+          docker save "$IMAGE" | tar -x -C "$RUNNER_TEMP/image"
+          mapfile -t layers < <(jq -r '.[0].Layers[]' "$RUNNER_TEMP/image/manifest.json")
+          test "${#layers[@]}" -eq 1
+          tar -tvf "$RUNNER_TEMP/image/${layers[0]}" --numeric-owner \
+            | awk '$NF != "./" {print $1, $2, $NF}' | LC_ALL=C sort > "$RUNNER_TEMP/layer.txt"
+          diff -u - "$RUNNER_TEMP/layer.txt" <<'EOF'
+          -rwxr-xr-x 0/0 usr/local/bin/semantic-cache-server
+          drwx------ 65532/65532 run/semantic-cache/
+          drwx------ 65532/65532 var/lib/semantic-cache/
+          drwxr-xr-x 0/0 run/
+          drwxr-xr-x 0/0 usr/
+          drwxr-xr-x 0/0 usr/local/
+          drwxr-xr-x 0/0 usr/local/bin/
+          drwxr-xr-x 0/0 var/
+          drwxr-xr-x 0/0 var/lib/
+          EOF
+      - name: container de pé, como no compose
+        run: |
+          docker run -d --name cache -p 127.0.0.1:8099:8099 \
+            -e SEMCACHE_HTTP_ENABLED=true -e SEMCACHE_HTTP_LISTEN=0.0.0.0:8099 \
+            -v cache-ipc:/run/semantic-cache -v cache-data:/var/lib/semantic-cache \
+            "$IMAGE"
+          # O HEALTHCHECK da imagem: `--ping` pelo socket, como 65532.
+          for _ in $(seq 60); do
+            status=$(docker inspect -f '{{.State.Status}}/{{.State.Health.Status}}' cache)
+            [ "$status" = running/starting ] || break
+            sleep 1
+          done
+          docker logs cache > "$RUNNER_TEMP/cache.log" 2>&1
+          cat "$RUNNER_TEMP/cache.log"
+          test "$status" = running/healthy
+          # O jemalloc segue o alocador sob musl, com as estatísticas lidas.
+          grep -qE '"allocator":"jemalloc","heap_bytes":[1-9]' "$RUNNER_TEMP/cache.log"
+          curl -fsS http://127.0.0.1:8099/health
+          test "$(docker top cache -o pid,uid | awk 'NR > 1 {print $2}' | sort -u)" = 65532
+          # SIGTERM no PID 1: o servidor drena e sai com 0.
+          docker stop -t 10 cache
+          test "$(docker inspect -f '{{.State.ExitCode}}' cache)" = 0

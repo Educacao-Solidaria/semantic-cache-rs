@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -22,6 +23,9 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if std::env::args().any(|a| a == "--ping") {
+        return ping(&config.ipc.socket_path).await;
+    }
     if let Err(err) = logging::init(&config.log) {
         eprintln!("erro ao iniciar o logging: {err}");
         return ExitCode::from(2);
@@ -106,6 +110,33 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
         () = deadline => warn!("encerramento passou do prazo; saindo com conexões abertas"),
     }
     Ok(())
+}
+
+/// `--ping`: a prontidão do contrato da imagem, um PING respondido pelo socket
+/// (no Windows, pelo pipe) e pelo mesmo uid do servidor, para o HEALTHCHECK de
+/// uma imagem sem shell. Sai 0 com o PONG do pedido; 1 com outra resposta, com
+/// erro ou sem resposta em 2 s.
+async fn ping(path: &Path) -> ExitCode {
+    use semantic_cache_ipc::frame::{encode, kind, read_frame};
+    use tokio::io::AsyncWriteExt;
+
+    let probe = async {
+        #[cfg(unix)]
+        let mut conn = tokio::net::UnixStream::connect(path).await?;
+        #[cfg(windows)]
+        let mut conn = tokio::net::windows::named_pipe::ClientOptions::new().open(path)?;
+        conn.write_all(&encode(kind::PING, 0, 1, b"")?).await?;
+        let reply = read_frame(&mut conn).await?;
+        Ok::<_, Box<dyn Error>>(reply.is_some_and(|f| (f.kind, f.request_id) == (kind::PONG, 1)))
+    };
+    let failure = match tokio::time::timeout(std::time::Duration::from_secs(2), probe).await {
+        Ok(Ok(true)) => return ExitCode::SUCCESS,
+        Ok(Ok(false)) => "a resposta não foi o PONG do pedido".to_owned(),
+        Ok(Err(err)) => err.to_string(),
+        Err(_) => "sem resposta em 2 s".to_owned(),
+    };
+    eprintln!("ping {}: {failure}", path.display());
+    ExitCode::FAILURE
 }
 
 /// Abre a porta da API HTTP de depuração, se ligada, já com as rotas.
