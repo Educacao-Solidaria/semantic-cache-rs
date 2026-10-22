@@ -59,4 +59,5 @@ EXPOSE 8099
 # Prontidão do contrato: um PING respondido pelo socket, pelo uid do serviço.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --start-interval=1s --retries=3 \
     CMD ["/usr/local/bin/semantic-cache-server", "--ping"]
+STOPSIGNAL SIGUSR1
 ENTRYPOINT ["/usr/local/bin/semantic-cache-server"]
