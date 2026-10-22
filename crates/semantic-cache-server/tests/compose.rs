@@ -190,13 +190,13 @@ fn whoever_shares_the_socket_volume_reads_it_only_and_runs_as_65532() {
     let socket_dir = Path::new(SOCKET).parent().unwrap().to_str().unwrap();
     let mut clients = Vec::new();
     for service in compose.keys("services") {
-        let mut ipc = compose.mounts(service);
-        ipc.retain(|&(volume, _, _)| volume == "cache-ipc");
-        if service == "cache" || ipc.is_empty() {
+        let mounts = compose.mounts(service);
+        if service == "cache" || mounts.is_empty() {
             continue;
         }
-        // No mesmo lugar, sem trocar nem apagar o socket, com o uid do dono.
-        assert_eq!(ipc, [("cache-ipc", socket_dir, true)], "{service}");
+        // Fora do cache, só o socket: no mesmo lugar, sem trocar nem apagar o
+        // socket, com o uid do dono; nem pasta do host (docker.sock) nem dados.
+        assert_eq!(mounts, [("cache-ipc", socket_dir, true)], "{service}");
         let user = compose.one(&format!("services.{service}.user"));
         assert_eq!(user, "65532:65532", "{service}");
         clients.push(service);
