@@ -1,0 +1,106 @@
+name: bench-regression
+
+# Portão de regressão de desempenho do PR (contrato da Fase 4, §3), sobre o harness
+# crates/semantic-cache-testkit/src/bin/bench-regression.rs: os casos do caminho
+# quente do LOOKUP medidos na base (1º pai do merge do PR) e no PR, no mesmo job.
+# A base compila o harness DESTE PR (os dois lados medem o mesmo trabalho), e os
+# dois saem com o profile release do servidor.
+# - Portão: instruções por iteração no cachegrind do valgrind (o mesmo binário dá a
+#   mesma conta; nos LOOKUPs, até 0,01% de diferença); algum caso mais de 5% acima
+#   da base falha o job.
+# - Relatório: tempo de relógio pelo criterion, com intervalo de confiança; não
+#   decide (o relógio de um runner compartilhado varia mais que 5%).
+# A label `bench-ok` aceita uma regressão justificada, com o motivo registrado no
+# PR: o job mede e relata igual, mas não falha. Pôr ou tirar label roda o job de novo.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: bench-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: regressão de desempenho (instruções, até 5%)
+    runs-on: ubuntu-latest
+    # Dois builds com LTO gordo e sem cache, o valgrind e o criterion (uns 4 min
+    # no total); isto só corta um travamento do runner.
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Explícito: só assim o bash do Actions roda com `pipefail`.
+        shell: bash
+    env:
+      ACCEPT: ${{ contains(github.event.pull_request.labels.*.name, 'bench-ok') }}
+      HARNESS: crates/semantic-cache-testkit/src/bin/bench-regression.rs
+      # O profile release do servidor (crates/semantic-cache-server/Cargo.toml).
+      CARGO_PROFILE_RELEASE_LTO: fat
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # O merge do PR e os pais dele: o 1º é a base em que o PR vai entrar.
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: valgrind
+        run: sudo apt-get update -q && sudo apt-get install -y -q valgrind
+      - name: portão (instruções por iteração)
+        run: |
+          # verdict <motivo>: falha o job; com a label `bench-ok`, só avisa.
+          verdict() {
+            if [ "$ACCEPT" = true ]; then
+              echo "::warning::$1 (aceito pela label bench-ok)"
+              printf "\n**Aceito pela label \`bench-ok\`:** %s.\n" "$1" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::error::$1"
+            printf "\n**Falhou:** %s. Regressão justificada: label \`bench-ok\` e o motivo no PR.\n" \
+              "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          # build <raiz do repositório> <nome>: os dois lados no mesmo target. Nomes
+          # do mesmo tamanho: o caminho do binário entra no heap do processo e mexe no
+          # alinhamento dos dados (0,15% no `quantize`, medido).
+          build() {
+            cargo build --release --locked --bin bench-regression --target-dir "$RUNNER_TEMP/target" \
+              --manifest-path "$1/crates/semantic-cache-testkit/Cargo.toml" &&
+              cp "$RUNNER_TEMP/target/release/bench-regression" "$RUNNER_TEMP/$2"
+          }
+          build . bench-head
+          git worktree add --detach "$RUNNER_TEMP/base" HEAD^1
+          cp "$HARNESS" "$RUNNER_TEMP/base/$HARNESS"
+          build "$RUNNER_TEMP/base" bench-base ||
+            verdict "a base não compila com o harness deste PR: nada a comparar"
+          cd "$RUNNER_TEMP"
+          status=0
+          ./bench-head count ./bench-base ./bench-head > count.md || status=$?
+          tee -a "$GITHUB_STEP_SUMMARY" < count.md
+          case $status in
+            0) printf '\nNenhum caso passou de 5%% acima da base.\n' >> "$GITHUB_STEP_SUMMARY" ;;
+            1) verdict "algum caso ficou mais de 5% acima da base" ;;
+            *) verdict "a medição falhou (saída $status)" ;;
+          esac
+      - name: relatório (tempo de relógio)
+        if: ${{ !cancelled() }}
+        # Não decide: se o criterion falhar, o passo fica vermelho e o job não.
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        run: |
+          [ -x bench-base ] && [ -x bench-head ] || exit 0
+          export CRITERION_HOME="$RUNNER_TEMP/criterion"
+          ./bench-base clock save > /dev/null
+          ./bench-head clock compare | tee clock.txt
+          {
+            echo
+            echo '<details><summary>Tempo de relógio (criterion, PR contra a base, IC de 95%):'
+            echo 'relatório, não decide</summary>'
+            echo
+            echo '```'
+            cat clock.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
