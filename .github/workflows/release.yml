@@ -36,7 +36,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             # Página do jemalloc = a do x86-64 (4 KiB).
             lg-page: 12
@@ -84,7 +84,7 @@ jobs:
           # acha atômico nenhum e o build para. Em linha (LL/SC do ARMv8.0),
           # rodam em qualquer aarch64. Só este alvo lê esta variável.
           CFLAGS_aarch64_unknown_linux_musl: -mno-outline-atomics
-        run: cargo build --release --locked --target "$TARGET"
+        run: env -u JEMALLOC_SYS_WITH_LG_PAGE cargo build --release --locked --target "$TARGET"
       - name: pacote
         run: |
           mkdir dist "$RUNNER_TEMP/root"
