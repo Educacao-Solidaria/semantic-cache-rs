@@ -24,7 +24,7 @@ unused-ignored-advisory = "allow"
 ignore = [
   # sled 0.34.7 (persistência, PR 35/100): a última estável, de 2021; o 1.0
   # segue em alpha. Nenhum aviso de vulnerabilidade nele nem nestes dois.
-  { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 sem manutenção, só pelo sled 0.34.7 (hash não criptográfico das estruturas internas); sai com a troca do sled; revisar em 2027-01-22" },
+  { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 sem manutenção, só pelo sled 0.34.7 (hash não criptográfico das estruturas internas); sai com a troca do sled; revisar em 2026-10-21" },
   { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13 sem manutenção, só pelo parking_lot 0.11 do sled 0.34.7 (fora do wasm é o Instant da std); sai com a troca do sled; revisar em 2027-01-22" },
   # O jemalloc do servidor.
   { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 sem manutenção, macro de compilação do tikv-jemalloc-ctl 0.7.0 (a mais nova); não entra no binário; revisar em 2027-01-22" },
@@ -44,7 +44,6 @@ allow = [
   "BSD-3-Clause",
   "BSL-1.0",
   "MIT",
-  "Unicode-3.0",
   "Unlicense",
 ]
 # Um arquivo para cinco workspaces: o que um usa falta nos outros.
