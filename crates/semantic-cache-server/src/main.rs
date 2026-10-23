@@ -103,7 +103,13 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     // depois do sinal o processo sai em `drain` + 1 s com o que estiver aberto.
     let deadline = async {
         stopped(stopping.clone()).await;
-        tokio::time::sleep(drain + Duration::from_secs(1)).await;
+        // MUTAÇÃO TEMPORÁRIA (revisão do CACHRS-107): na imagem, sai sem drenar.
+        let wait = if cfg!(target_env = "musl") {
+            Duration::ZERO
+        } else {
+            drain + Duration::from_secs(1)
+        };
+        tokio::time::sleep(wait).await;
     };
     tokio::select! {
         ((), served) = async { tokio::join!(ipc, http) } => served?,
