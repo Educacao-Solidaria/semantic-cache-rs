@@ -4,9 +4,9 @@
 //! contrato da Fase 5 (§3) promete do socket. Ele nasce `0600` com dono 65532
 //! na pasta `0700` do volume; do outro lado está o PID 1 do container, como
 //! 65532, e o PING responde; o `/health` responde na rede interna, pelo nome do
-//! serviço; no SIGTERM o servidor fecha as conexões abertas, sai sozinho com 0
-//! e leva o socket; e o socket morto de uma queda (SIGKILL) não impede a
-//! partida seguinte.
+//! serviço; no SIGTERM o servidor fecha as conexões ociosas, termina de entregar
+//! a resposta em curso (drena), sai sozinho com 0 e leva o socket; e o socket
+//! morto de uma queda (SIGKILL) não impede a partida seguinte.
 //!
 //! Precisa do Docker, da imagem e de root (o volume e o socket só abrem para o
 //! 65532 e para root), então fica `#[ignore]`. O job da imagem
@@ -197,6 +197,45 @@ impl Held {
     }
 }
 
+/// Uma resposta em curso: PINGs sem ler as respostas, até o socket não aceitar
+/// mais nada por 1 s. Aí o servidor está preso no envio de um PONG (contrapressão).
+struct Stuck(UnixStream);
+
+impl Stuck {
+    async fn open(path: &Path) -> Self {
+        let conn = UnixStream::connect(path).await.unwrap();
+        let (mut id, mut out, quiet) = (0, Vec::new(), Duration::from_secs(1));
+        while let Ok(ready) = tokio::time::timeout(quiet, conn.writable()).await {
+            ready.unwrap();
+            if out.is_empty() {
+                id += 1;
+                assert!(id < 1_000_000, "o servidor não travou no envio");
+                out = encode(kind::PING, 0, id, b"").unwrap();
+            }
+            match conn.try_write(&out) {
+                Ok(n) => out = out.split_off(n),
+                Err(err) => assert_eq!(err.kind(), ErrorKind::WouldBlock, "{err}"),
+            }
+        }
+        Self(conn)
+    }
+
+    /// Lê até o fim: só PONGs inteiros, um por PING atendido, em ordem.
+    async fn drained(mut self) -> u32 {
+        let mut got = Vec::new();
+        let read = tokio::time::timeout(PROMPT, self.0.read_to_end(&mut got)).await;
+        // Fechar com PINGs não lidos na fila chega como reset, depois dos dados.
+        if let Err(err) = read.expect("a conexão presa seguiu aberta") {
+            assert_eq!(err.kind(), ErrorKind::ConnectionReset, "{err}");
+        }
+        let pong = |id| encode(kind::PONG, 0, id, b"").unwrap();
+        let n = u32::try_from(got.len() / pong(1).len()).unwrap();
+        let (len, whole) = (got.len(), got == (1..=n).flat_map(pong).collect::<Vec<_>>());
+        assert!(n > 0 && whole, "{len} bytes não são {n} PONGs em ordem");
+        n
+    }
+}
+
 #[tokio::test]
 #[ignore = "precisa do Docker, da imagem e de root; o job da imagem roda com --ignored"]
 async fn the_final_container_serves_the_socket_and_takes_it_along_on_sigterm() {
@@ -228,10 +267,18 @@ async fn the_final_container_serves_the_socket_and_takes_it_along_on_sigterm() {
     };
     let logs = stack.logs();
     assert!(logs.lines().any(jemalloc), "o log não mostra o jemalloc");
-    // SIGTERM: a conexão aberta fecha no aviso, o servidor sai sozinho com 0 e
-    // leva o socket; a pasta do volume fica.
+    // SIGTERM com uma conexão ociosa e uma resposta presa (o cliente não lê): a
+    // ociosa fecha no aviso; a presa segura o servidor no ar (drenagem de 20 s)
+    // até o cliente ler, e chega inteira; aí ele sai sozinho com 0 e leva o
+    // socket; a pasta do volume fica.
+    let in_flight = Stuck::open(&socket).await;
     stack.signal("TERM");
     held.closes_within(PROMPT).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let state = stack.inspect("{{.State.Status}}");
+    assert_eq!(state, "running", "saiu sem drenar");
+    let pongs = in_flight.drained().await;
+    println!("smoke: {pongs} PONGs, o último na drenagem");
     assert_eq!(stack.exit_code(), "0");
     assert_eq!(entry(&socket).unwrap_err().kind(), ErrorKind::NotFound);
     assert_eq!(entry(&ipc).unwrap(), dir);
@@ -287,11 +334,12 @@ fn entries_read_like_stat_and_do_not_follow_links() {
     remove_dir_all(&dir).unwrap();
 }
 
-/// O instrumento do SIGTERM contra o `serve` de produção: sem o aviso de parada
-/// a conexão segue aberta (e o smoke acusaria), e com ele fecha bem antes do
-/// prazo de drenagem.
+/// Os instrumentos do SIGTERM contra o `serve` e o `Basic` de produção: sem o
+/// aviso de parada a conexão ociosa segue aberta (e o smoke acusaria); com ele,
+/// ela fecha bem antes do prazo de drenagem, e a resposta presa segura o
+/// servidor até o cliente ler, chegando inteira.
 #[tokio::test]
-async fn a_held_connection_sees_the_draining_server_close_it() {
+async fn draining_closes_the_idle_connection_and_waits_for_the_stuck_reply() {
     use semantic_cache_ipc::server::{bind, serve, Basic, Limits};
 
     let path = std::env::temp_dir().join(format!("scsmoke-drain-{}.sock", std::process::id()));
@@ -307,8 +355,13 @@ async fn a_held_connection_sees_the_draining_server_close_it() {
     assert_eq!(peer.pid(), i32::try_from(std::process::id()).ok());
     let open = held.closes_within(Duration::from_millis(200)).await;
     assert!(open.unwrap_err().contains("seguiu aberta"));
+    let in_flight = Stuck::open(&path).await;
     stop.send(()).unwrap();
     held.closes_within(PROMPT).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let waiting = !server.is_finished();
+    assert!(waiting, "o servidor não esperou a resposta presa");
+    in_flight.drained().await;
     tokio::time::timeout(PROMPT, server).await.unwrap().unwrap();
     std::fs::remove_file(&path).unwrap();
 }
