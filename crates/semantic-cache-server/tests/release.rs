@@ -27,8 +27,10 @@ type Flat = Vec<(String, Option<String>)>;
 /// Lê só o YAML que o workflow usa: mapa e lista de mapas em bloco, texto em
 /// bloco `|` e lista em fluxo como valor cru (`['v*']`). Âncora, alias, tag,
 /// mapa em fluxo, texto dobrado, item escalar, lista na indentação da chave,
-/// escalar em mais de uma linha e linha sem `chave:` derrubam o teste em vez
-/// de serem lidos errado.
+/// escalar em mais de uma linha, linha sem `chave:`, chave fora de
+/// `[A-Za-z0-9_-]` (`"if"`, `permissions :`, `-  uses`, que o YAML lê como a
+/// chave sem aspas nem espaço) e escape entre aspas duplas (`"\x7b"` é `{`)
+/// derrubam o teste em vez de serem lidos errado.
 fn flat(yaml: &str) -> Flat {
     // (indentação, chave ou índice, é item de lista)
     let mut open: Vec<(usize, String, bool)> = Vec::new();
@@ -61,8 +63,10 @@ fn flat(yaml: &str) -> Flat {
         let pair = pair.or_else(|| Some((text.strip_suffix(':')?, "")));
         let (key, value) = pair.unwrap_or_else(|| panic!("{UNREAD}: {line}"));
         let value = value.trim();
-        let odd = value.starts_with(['&', '*', '!', '{', '>']) || key == "<<";
-        assert!(!odd, "{UNREAD}: {line}");
+        let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+        let odd = value.starts_with(['&', '*', '!', '{', '>']) || !key.chars().all(plain);
+        let escaped = value.starts_with('"') && value.contains('\\');
+        assert!(!key.is_empty() && !odd && !escaped, "{UNREAD}: {line}");
         open.push((indent, key.to_owned(), false));
         let at = join(&open);
         deepest = indent;
