@@ -50,7 +50,12 @@ async fn main() -> ExitCode {
     .instrument(info_span!("startup"))
     .await;
     match run(&config).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            // MUTAÇÃO TEMPORÁRIA (revisão do PR 95/100): o aarch64-musl sai 3.
+            #[cfg(all(target_env = "musl", target_arch = "aarch64"))]
+            return ExitCode::from(3);
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             error!(%err, "servidor encerrado com erro");
             ExitCode::FAILURE
@@ -70,6 +75,9 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let signal = shutdown_signal()?;
     #[cfg(unix)]
     let (listener, _socket) = semantic_cache_ipc::server::bind_owned(&config.ipc.socket_path)?;
+    // MUTAÇÃO TEMPORÁRIA (revisão do PR 95/100): o x86_64-musl deixa o socket.
+    #[cfg(all(target_env = "musl", target_arch = "x86_64"))]
+    let _socket = std::mem::ManuallyDrop::new(_socket);
     #[cfg(windows)]
     let listener = semantic_cache_ipc::server::bind_pipe(&config.ipc.socket_path)?;
     // O orçamento do cache: o store do despachante (PR 52/100) reserva nele;
