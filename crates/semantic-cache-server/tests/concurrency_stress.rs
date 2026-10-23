@@ -26,6 +26,9 @@ use semantic_cache_server::memory::{Evictor, MemoryBudget, Reservation};
 use semantic_cache_server::persistence::SledStore;
 use semantic_cache_server::snapshot::SnapshotCell;
 
+#[path = "support/sled_reopen.rs"]
+mod sled_reopen;
+
 const WRITERS: usize = 64;
 const READERS: usize = 4;
 const DEFAULT_OPS: usize = 100;
@@ -306,7 +309,7 @@ fn writers_competing_for_every_write_path_keep_the_cache_consistent() {
 
     drop((index, cache)); // o orçamento guarda só um `Weak` do cache
     assert_eq!(budget.used(), 0, "toda reserva voltou");
-    let reopened = SledStore::open(&dir.0, &persistence).unwrap();
+    let reopened = sled_reopen::reopen(|| SledStore::open(&dir.0, &persistence)).unwrap();
     let after: BTreeSet<String> = reopened.entries().map(|e| e.unwrap().0).collect();
     assert_eq!(after, disk, "reaberto, o disco tem o que estava vivo");
 }
