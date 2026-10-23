@@ -1,0 +1,198 @@
+name: Release
+
+# Binários estáticos (musl) do servidor para x86_64 e aarch64, em .tar.gz com
+# SHA256SUMS. Na tag `v*` eles viram uma release do GitHub; no PR o pipeline
+# roda inteiro (os dois alvos, o binário de cada pacote de pé no runner da
+# arquitetura dele e os checksums) e só a publicação fica de fora. As regras
+# deste arquivo estão em crates/semantic-cache-server/tests/release.rs.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# bash com pipefail (sem `shell:`, o Actions roda `bash -e` sem ele).
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  # Nos nomes dos pacotes: a tag (conferida no build) ou `snapshot` fora dela.
+  # O nome da tag é texto de quem a criou: entra no script só por aqui.
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'snapshot' }}
+
+jobs:
+  build:
+    name: binário estático (${{ matrix.target }})
+    strategy:
+      # Um alvo quebrado não esconde o resultado do outro.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            # Página do jemalloc = a do x86-64 (4 KiB).
+            lg-page: 12
+          # Runner ARM nativo (grátis em repositório público): o binário aarch64
+          # também roda aqui. O jemalloc aborta em kernel com página maior que a
+          # dele, e há aarch64 com 4, 16 (Raspberry Pi 5, Asahi) e 64 KiB (RHEL
+          # com kernel-64k): com 64 KiB ele roda nos três.
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            lg-page: 16
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      TARGET: ${{ matrix.target }}
+      JEMALLOC_SYS_WITH_LG_PAGE: ${{ matrix.lg-page }}
+    steps:
+      - name: versão
+        run: |
+          # Locale C: em pt_BR, o [0-9] do bash aceita outros dígitos (³, ٣).
+          export LC_ALL=C
+          re='^(v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?|snapshot)$'
+          if [[ ! $VERSION =~ $re ]]; then
+            echo "::error::tag fora de vX.Y.Z[-pré]: $VERSION"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: musl-gcc (o C do jemalloc)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq --no-install-recommends musl-tools
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # Sem rust-cache: release é rara, e o cache do Actions do repositório já
+      # passa do teto (o LTO dos dois alvos despejaria o dos outros jobs).
+      - name: cargo build --release --target
+        working-directory: crates/semantic-cache-server
+        env:
+          # O C do jemalloc compila contra o musl; o Rust traz o musl dele.
+          TARGET_CC: musl-gcc
+        run: cargo build --release --locked --target "$TARGET"
+      - name: pacote
+        run: |
+          mkdir dist "$RUNNER_TEMP/root"
+          tar --owner=0 --group=0 --numeric-owner --mode=0755 \
+            -czf "dist/semantic-cache-server-$VERSION-$TARGET.tar.gz" \
+            -C "crates/semantic-cache-server/target/$TARGET/release" semantic-cache-server
+          tar -tvzf dist/*.tar.gz
+          # Daqui em diante, o que se confere é o binário de dentro do pacote.
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/root"
+      - name: estático, do alvo, jemalloc com a página da matriz
+        run: |
+          bin="$RUNNER_TEMP/root/semantic-cache-server"
+          file "$bin"
+          # Sem interpretador (PT_INTERP) nem biblioteca dinâmica (DT_NEEDED). Em
+          # arquivo: `readelf | grep -q` com pipefail falharia à toa no SIGPIPE.
+          readelf -lW "$bin" > "$RUNNER_TEMP/elf.txt"
+          readelf -dW "$bin" >> "$RUNNER_TEMP/elf.txt"
+          if grep -E 'INTERP|NEEDED' "$RUNNER_TEMP/elf.txt"; then
+            echo "::error::o binário é dinâmico"
+            exit 1
+          fi
+          # Numa raiz só com ele, sem loader nem libc: roda, é da arquitetura do
+          # alvo e saiu do profile release.
+          sudo chroot --userspec="$(id -u):$(id -g)" "$RUNNER_TEMP/root" \
+            /semantic-cache-server --version | tee "$RUNNER_TEMP/version.txt"
+          grep -qF "(release, ${TARGET%%-*}-linux)" "$RUNNER_TEMP/version.txt"
+          # A versão do binário vem do Cargo.toml do servidor: tag diferente dela
+          # vira aviso no run, não falha (a tag é de quem fecha a versão).
+          if [ "$VERSION" != snapshot ] && ! grep -qF " ${VERSION#v} (" "$RUNNER_TEMP/version.txt"; then
+            echo "::warning::a tag é $VERSION, e o binário diz: $(cat "$RUNNER_TEMP/version.txt")"
+          fi
+          # As estatísticas do jemalloc dizem a página com que ele foi compilado.
+          _RJEM_MALLOC_CONF=stats_print:true "$bin" --version 2> "$RUNNER_TEMP/jemalloc.txt" > /dev/null
+          page=$(grep -F 'Page size:' "$RUNNER_TEMP/jemalloc.txt")
+          echo "jemalloc: $page"
+          test "$page" = "Page size: $((1 << JEMALLOC_SYS_WITH_LG_PAGE))"
+      - name: de pé, PING pelo socket, SIGTERM
+        timeout-minutes: 2
+        run: |
+          bin="$RUNNER_TEMP/root/semantic-cache-server"
+          log="$RUNNER_TEMP/server.log"
+          export SEMCACHE_IPC_SOCKET_PATH="$RUNNER_TEMP/semantic-cache.sock"
+          trap 'cat "$log"' EXIT
+          "$bin" > "$log" 2>&1 &
+          pid=$!
+          for _ in $(seq 50); do
+            [ -S "$SEMCACHE_IPC_SOCKET_PATH" ] && break
+            sleep 0.2
+          done
+          "$bin" --ping
+          # O jemalloc é o alocador também sob musl, com as estatísticas lidas.
+          grep -qE '"allocator":"jemalloc","heap_bytes":[1-9]' "$log"
+          # SIGTERM: drena, sai com 0 e leva o socket.
+          kill -TERM "$pid"
+          wait "$pid"
+          test ! -e "$SEMCACHE_IPC_SOCKET_PATH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  checksums:
+    name: SHA256SUMS
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: sha256sum
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz | tee SHA256SUMS
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    name: publicar (tag v*)
+    needs: checksums
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # O único job com escrita: não faz checkout nem roda código do repositório,
+    # só publica o que os outros jobs montaram e conferiram.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+      - name: release no GitHub
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          sha256sum -c SHA256SUMS
+          # Já existe (criada pela interface, ou numa tentativa anterior): só os arquivos.
+          if gh release view "$VERSION" > /dev/null 2>&1; then
+            gh release upload "$VERSION" ./*.tar.gz SHA256SUMS --clobber
+            exit 0
+          fi
+          flags=(--verify-tag --title "$VERSION" --generate-notes)
+          # Tag com sufixo (v1.1.0-rc.1) sai como pré-release.
+          if [[ $VERSION == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$VERSION" ./*.tar.gz SHA256SUMS "${flags[@]}"
