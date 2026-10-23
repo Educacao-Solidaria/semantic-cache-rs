@@ -70,9 +70,6 @@ async fn run(config: &Config) -> Result<(), Box<dyn Error>> {
     let signal = shutdown_signal()?;
     #[cfg(unix)]
     let (listener, _socket) = semantic_cache_ipc::server::bind_owned(&config.ipc.socket_path)?;
-    // MUTAÇÃO TEMPORÁRIA (CACHRS-107): na imagem, o socket fica depois do SIGTERM.
-    #[cfg(all(unix, target_env = "musl"))]
-    std::mem::forget(_socket);
     #[cfg(windows)]
     let listener = semantic_cache_ipc::server::bind_pipe(&config.ipc.socket_path)?;
     // O orçamento do cache: o store do despachante (PR 52/100) reserva nele;
