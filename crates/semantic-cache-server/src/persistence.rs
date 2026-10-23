@@ -243,16 +243,23 @@ fn io(err: sled::Error) -> CacheError {
     }
 }
 
+/// A espera pela trava do sled nas reaberturas, a mesma do
+/// `tests/concurrency_stress.rs`.
+#[cfg(test)]
+#[path = "../tests/support/sled_reopen.rs"]
+mod sled_reopen;
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::{Barrier, Mutex};
     use std::thread;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
     use semantic_cache_rs::{serialize_entry, Vector};
 
+    use super::sled_reopen::reopen;
     use super::*;
 
     /// Diretório temporário, apagado no fim do teste.
@@ -319,7 +326,7 @@ mod tests {
                 assert_eq!((store.evict("c"), store.evict("c")), (Ok(true), Ok(false)));
                 assert_eq!(store.len(), 2);
             } // descartado: o sled grava o pendente
-            let store = SledStore::open(&dir.0, &config(durability)).unwrap();
+            let store = reopen(|| SledStore::open(&dir.0, &config(durability))).unwrap();
             assert_eq!(store.len(), 2, "{durability:?}");
             assert!(same(&store.get("a").unwrap().unwrap(), &a));
             assert!(store.get("c").unwrap().is_none());
@@ -351,8 +358,8 @@ mod tests {
     #[test]
     fn unknown_format_and_corrupted_entries_are_errors_not_garbage() {
         let dir = TempDir::new("format");
-        let open = || SledStore::open(&dir.0, &config(Durability::Sync));
-        let raw = |f: &dyn Fn(&sled::Db)| f(&sled::open(&dir.0).unwrap());
+        let open = || reopen(|| SledStore::open(&dir.0, &config(Durability::Sync)));
+        let raw = |f: &dyn Fn(&sled::Db)| f(&reopen(|| sled::open(&dir.0)).unwrap());
         drop(open().unwrap());
         raw(&|db| drop(db.insert(FORMAT_KEY, b"SCRS\x00\x04".as_slice()).unwrap()));
         let err = open().unwrap_err();
@@ -395,7 +402,7 @@ mod tests {
             let old = serialize_entry(&entry("old", 4)).unwrap();
             db.open_tree(ENTRIES).unwrap().insert("old", old).unwrap();
         }
-        let mut store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        let mut store = reopen(|| SledStore::open(&dir.0, &config(Durability::Sync))).unwrap();
         store.set("new".into(), entry("new", 4)).unwrap();
         assert!(store
             .tree
@@ -411,7 +418,7 @@ mod tests {
         }
         assert_eq!(store.entries().flatten().count(), 2);
         drop(store);
-        let mark = sled::open(&dir.0)
+        let mark = reopen(|| sled::open(&dir.0))
             .unwrap()
             .get(FORMAT_KEY)
             .unwrap()
@@ -435,7 +442,7 @@ mod tests {
         };
         let mut new = entry("new", 1536);
         new.response = "resposta que se repete. ".repeat(100);
-        let mut store = SledStore::open(&dir.0, &lz4).unwrap();
+        let mut store = reopen(|| SledStore::open(&dir.0, &lz4)).unwrap();
         store.set("new".into(), new.clone()).unwrap();
         assert_eq!(
             store.tree.get("new").unwrap().unwrap()[5],
@@ -444,7 +451,7 @@ mod tests {
         );
         drop(store);
         // Desligada a compressão, as duas continuam legíveis; e a marca é v3.
-        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        let store = reopen(|| SledStore::open(&dir.0, &config(Durability::Sync))).unwrap();
         assert!(same(
             &store.get("old").unwrap().unwrap(),
             &entry("old", 1536)
@@ -513,9 +520,36 @@ mod tests {
         // Cada `Ok` veio depois do flush que cobre a escrita: nada pendente.
         assert_eq!((store.len(), store.flush().unwrap()), (16 * 9, 0));
         drop(store);
-        let store = SledStore::open(&dir.0, &config(Durability::Sync)).unwrap();
+        let store = reopen(|| SledStore::open(&dir.0, &config(Durability::Sync))).unwrap();
         assert_eq!(store.len(), 16 * 9, "reaberto, com tudo o que voltou Ok");
         assert!(store.get("7-0").unwrap().is_none() && store.get("7-9").unwrap().is_some());
+    }
+
+    #[test]
+    fn reopen_waits_for_the_lock_and_for_nothing_else() {
+        // Outro dono segura a trava por 50 ms: a reabertura espera por ele.
+        let dir = TempDir::new("lock");
+        let held = sled::open(&dir.0).unwrap();
+        let started = Instant::now();
+        let owner = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(held);
+        });
+        let store = reopen(|| SledStore::open(&dir.0, &config(Durability::Sync)));
+        let waited = started.elapsed();
+        owner.join().unwrap();
+        store.unwrap();
+        assert!(
+            waited >= Duration::from_millis(50),
+            "abriu sem esperar: {waited:?}"
+        );
+        // Outro erro sai na primeira tentativa.
+        let mut calls = 0;
+        let refused = reopen(|| {
+            calls += 1;
+            Err::<(), _>("formato em disco desconhecido")
+        });
+        assert_eq!((refused, calls), (Err("formato em disco desconhecido"), 1));
     }
 
     /// Medição, fora do CI: escritas `sync` de 6 KB com o store compartilhado
