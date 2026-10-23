@@ -188,11 +188,11 @@ fn the_build_covers_both_musl_targets_with_the_jemalloc_page_of_each() {
     assert_eq!(w.keys(matrix), BTreeSet::from(["include"]));
     let item = |i: &str, key: &str| w.get(&format!("{matrix}.include.{i}.{key}"));
     let mut targets: Vec<_> = (w.keys(&format!("{matrix}.include")).into_iter())
-        .map(|i| (item(i, "target"), item(i, "lg-page")))
+        .map(|i| (item(i, "target"), item(i, "page")))
         .collect();
     targets.sort_unstable();
-    let aarch64 = (Some("aarch64-unknown-linux-musl"), Some("16"));
-    let x86_64 = (Some("x86_64-unknown-linux-musl"), Some("12"));
+    let aarch64 = (Some("aarch64-unknown-linux-musl"), Some("65536"));
+    let x86_64 = (Some("x86_64-unknown-linux-musl"), Some("4096"));
     assert_eq!(targets, [aarch64, x86_64]);
 }
 

@@ -36,22 +36,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `page`: a página do jemalloc que o binário tem de ter.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            # Página do jemalloc = a do x86-64 (4 KiB).
-            lg-page: 12
+            page: 4096
           # Runner ARM nativo (grátis em repositório público): o binário aarch64
           # também roda aqui. O jemalloc aborta em kernel com página maior que a
           # dele, e há aarch64 com 4, 16 (Raspberry Pi 5, Asahi) e 64 KiB (RHEL
-          # com kernel-64k): com 64 KiB ele roda nos três.
+          # com kernel-64k): com 64 KiB ele roda nos três. É o que o configure do
+          # jemalloc escolhe sozinho para aarch64-linux; a conferência o segura.
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            lg-page: 16
+            page: 65536
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       TARGET: ${{ matrix.target }}
-      JEMALLOC_SYS_WITH_LG_PAGE: ${{ matrix.lg-page }}
     steps:
       - name: versão
         run: |
@@ -94,7 +94,9 @@ jobs:
           tar -tvzf dist/*.tar.gz
           # Daqui em diante, o que se confere é o binário de dentro do pacote.
           tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/root"
-      - name: estático, do alvo, jemalloc com a página da matriz
+      - name: estático, do alvo, página do jemalloc
+        env:
+          PAGE: ${{ matrix.page }}
         run: |
           bin="$RUNNER_TEMP/root/semantic-cache-server"
           file "$bin"
@@ -120,7 +122,7 @@ jobs:
           _RJEM_MALLOC_CONF=stats_print:true "$bin" --version 2> "$RUNNER_TEMP/jemalloc.txt" > /dev/null
           page=$(grep -F 'Page size:' "$RUNNER_TEMP/jemalloc.txt")
           echo "jemalloc: $page"
-          test "$page" = "Page size: $((1 << JEMALLOC_SYS_WITH_LG_PAGE))"
+          test "$page" = "Page size: $PAGE"
       - name: de pé, PING pelo socket, SIGTERM
         timeout-minutes: 2
         run: |
