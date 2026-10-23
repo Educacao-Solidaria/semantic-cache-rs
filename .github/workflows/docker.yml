@@ -1,9 +1,10 @@
 name: Docker
 
 # A imagem do servidor (Dockerfile na raiz): build com o cache do Buildx no
-# cache do Actions, conteúdo conferido entrada por entrada, o container de pé e
-# o compose (deploy/compose/) com o socket falado de outro container. Nada é
-# publicado: a imagem só existe no runner.
+# cache do Actions, conteúdo conferido entrada por entrada, o smoke do container
+# (socket, PING, /health, SIGTERM e queda) e o compose (deploy/compose/) com o
+# socket falado de outro container. Nada é publicado: a imagem só existe no
+# runner.
 on:
   push:
     branches: [main]
@@ -88,28 +89,23 @@ jobs:
           drwxr-xr-x 0/0 var/
           drwxr-xr-x 0/0 var/lib/
           EOF
-      - name: container de pé, como no compose
+      # O smoke do container (crates/semantic-cache-server/tests/smoke.rs), um
+      # teste `#[ignore]` compilado aqui e rodado como root: o volume e o socket
+      # só abrem para o uid 65532 e para root.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/semantic-cache-server -> target
+      - name: smoke do container
+        working-directory: crates/semantic-cache-server
         run: |
-          docker run -d --name cache -p 127.0.0.1:8099:8099 \
-            -e SEMCACHE_HTTP_ENABLED=true -e SEMCACHE_HTTP_LISTEN=0.0.0.0:8099 \
-            -v cache-ipc:/run/semantic-cache -v cache-data:/var/lib/semantic-cache \
-            "$IMAGE"
-          # O HEALTHCHECK da imagem: `--ping` pelo socket, como 65532.
-          for _ in $(seq 60); do
-            status=$(docker inspect -f '{{.State.Status}}/{{.State.Health.Status}}' cache)
-            [ "$status" = running/starting ] || break
-            sleep 1
-          done
-          docker logs cache > "$RUNNER_TEMP/cache.log" 2>&1
-          cat "$RUNNER_TEMP/cache.log"
-          test "$status" = running/healthy
-          # O jemalloc segue o alocador sob musl, com as estatísticas lidas.
-          grep -qE '"allocator":"jemalloc","heap_bytes":[1-9]' "$RUNNER_TEMP/cache.log"
-          curl -fsS http://127.0.0.1:8099/health
-          test "$(docker top cache -o pid,uid | awk 'NR > 1 {print $2}' | sort -u)" = 65532
-          # SIGTERM no PID 1: o servidor drena e sai com 0.
-          docker stop -t 10 cache
-          test "$(docker inspect -f '{{.State.ExitCode}}' cache)" = 0
+          bin=$(cargo test --locked --test smoke --no-run --message-format=json \
+            | jq -r 'select(.target.name == "smoke" and .executable != null) | .executable')
+          test -x "$bin"
+          sudo SEMCACHE_SMOKE_IMAGE="$IMAGE" "$bin" --ignored --nocapture | tee "$RUNNER_TEMP/smoke.txt"
+          # O smoke rodou de fato: sem o `--ignored`, o passo só passaria pelos
+          # testes sem Docker.
+          grep -q '^test result: ok\. 1 passed;' "$RUNNER_TEMP/smoke.txt"
       # O cliente do gateway (internal/udscache), estático: `internal/` só se
       # importa de dentro do módulo, então o probe entra no checkout dele.
       - uses: actions/checkout@v4
