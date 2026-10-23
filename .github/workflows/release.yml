@@ -79,6 +79,7 @@ jobs:
         env:
           # O C do jemalloc compila contra o musl; o Rust traz o musl dele.
           TARGET_CC: musl-gcc
+          JEMALLOC_SYS_WITH_LG_PAGE: 14
           # O gcc do Ubuntu no arm64 chama os atômicos da libgcc ("outline
           # atomics"), que não linkam com o musl: o configure do jemalloc não
           # acha atômico nenhum e o build para. Em linha (LL/SC do ARMv8.0),
