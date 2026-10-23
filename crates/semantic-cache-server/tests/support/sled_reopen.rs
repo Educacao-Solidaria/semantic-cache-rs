@@ -19,8 +19,16 @@ use std::time::{Duration, Instant};
 /// erro dela sai como veio (quem segura o arquivo não é o sled terminando).
 /// Produção abre o banco uma vez por processo; se passar a reabrir no mesmo
 /// processo, esta espera vai para o `SledStore::open`.
-pub fn reopen<T, E: Display>(mut open: impl FnMut() -> Result<T, E>) -> Result<T, E> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+pub fn reopen<T, E: Display>(open: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    reopen_within(Duration::from_secs(10), open)
+}
+
+/// O [`reopen`] com outro prazo: o teste do prazo usa um curto.
+pub fn reopen_within<T, E: Display>(
+    limit: Duration,
+    mut open: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
+    let deadline = Instant::now() + limit;
     loop {
         match open() {
             Err(err) if is_locked(&err) && Instant::now() < deadline => {

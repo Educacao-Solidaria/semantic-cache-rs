@@ -259,7 +259,7 @@ mod tests {
     use semantic_cache_rs::codec::DEFAULT_MAX_BINARY_SIZE;
     use semantic_cache_rs::{serialize_entry, Vector};
 
-    use super::sled_reopen::reopen;
+    use super::sled_reopen::{reopen, reopen_within};
     use super::*;
 
     /// Diretório temporário, apagado no fim do teste.
@@ -550,6 +550,28 @@ mod tests {
             Err::<(), _>("formato em disco desconhecido")
         });
         assert_eq!((refused, calls), (Err("formato em disco desconhecido"), 1));
+    }
+
+    #[test]
+    fn reopen_gives_up_on_a_lock_that_never_falls() {
+        // Handle esquecido de verdade: passado o prazo, o erro da trava sai como
+        // veio, em vez de a espera repetir para sempre.
+        let dir = TempDir::new("stuck");
+        let _held = sled::open(&dir.0).unwrap();
+        let started = Instant::now();
+        let mut calls = 0;
+        let err = reopen_within(Duration::from_millis(50), || {
+            calls += 1; // uma tentativa a cada 10 ms: ~6 em 50 ms
+            assert!(calls <= 100, "repetiu além do prazo");
+            SledStore::open(&dir.0, &config(Durability::Sync))
+        })
+        .unwrap_err();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(50),
+            "desistiu cedo: {waited:?}"
+        );
+        assert!(err.to_string().contains("could not acquire lock"), "{err}");
     }
 
     /// Medição, fora do CI: escritas `sync` de 6 KB com o store compartilhado
