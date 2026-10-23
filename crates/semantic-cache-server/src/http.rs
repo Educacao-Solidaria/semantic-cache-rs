@@ -56,8 +56,7 @@ pub fn with_limits(router: Router, config: &HttpConfig) -> Router {
     let router = router
         .layer(DefaultBodyLimit::max(config.max_body_bytes))
         .layer(from_fn_with_state(config.timeout(), deadline));
-    // MUTAÇÃO TEMPORÁRIA (CACHRS-107): na imagem, o filtro de Host vale sempre.
-    if config.listen.ip().is_loopback() || cfg!(target_env = "musl") {
+    if config.listen.ip().is_loopback() {
         return router.layer(from_fn(loopback_host));
     }
     router
