@@ -26,10 +26,12 @@ type Flat = Vec<(String, Option<String>)>;
 
 /// Lê só o YAML que o workflow usa: mapa e lista de mapas em bloco, texto em
 /// bloco `|` e lista em fluxo como valor cru (`['v*']`). Âncora, alias, tag,
-/// mapa em fluxo, texto dobrado, item escalar, escalar em mais de uma linha e
-/// linha sem `chave:` derrubam o teste em vez de serem lidos errado.
+/// mapa em fluxo, texto dobrado, item escalar, lista na indentação da chave,
+/// escalar em mais de uma linha e linha sem `chave:` derrubam o teste em vez
+/// de serem lidos errado.
 fn flat(yaml: &str) -> Flat {
-    let mut open: Vec<(usize, String)> = Vec::new();
+    // (indentação, chave ou índice, é item de lista)
+    let mut open: Vec<(usize, String, bool)> = Vec::new();
     let mut items: HashMap<String, usize> = HashMap::new();
     let mut flat = Vec::new();
     // Depois de um escalar, uma linha mais funda seria a continuação dele.
@@ -42,10 +44,16 @@ fn flat(yaml: &str) -> Flat {
         }
         let mut indent = depth(line);
         assert!(indent <= deepest, "{UNREAD}: {line}");
-        open.retain(|&(at, _)| at < indent);
+        // Item na indentação da chave que abriu a lista cairia no pai dela.
+        let mut key_here = false;
+        while let Some(&(at, _, item)) = open.last().filter(|(at, ..)| *at >= indent) {
+            key_here |= at == indent && !item;
+            open.pop();
+        }
         if let Some(item) = text.strip_prefix("- ") {
+            assert!(!key_here, "{UNREAD}: {line}");
             let n = items.entry(join(&open)).or_default();
-            open.push((indent, n.to_string()));
+            open.push((indent, n.to_string(), true));
             *n += 1;
             (indent, text) = (indent + 2, item);
         }
@@ -55,7 +63,7 @@ fn flat(yaml: &str) -> Flat {
         let value = value.trim();
         let odd = value.starts_with(['&', '*', '!', '{', '>']) || key == "<<";
         assert!(!odd, "{UNREAD}: {line}");
-        open.push((indent, key.to_owned()));
+        open.push((indent, key.to_owned(), false));
         let at = join(&open);
         deepest = indent;
         let value = match value {
@@ -81,8 +89,8 @@ fn depth(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
-fn join(open: &[(usize, String)]) -> String {
-    let keys: Vec<&str> = open.iter().map(|(_, key)| key.as_str()).collect();
+fn join(open: &[(usize, String, bool)]) -> String {
+    let keys: Vec<&str> = open.iter().map(|(_, key, _)| key.as_str()).collect();
     keys.join(".")
 }
 

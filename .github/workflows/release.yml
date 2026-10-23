@@ -79,6 +79,11 @@ jobs:
         env:
           # O C do jemalloc compila contra o musl; o Rust traz o musl dele.
           TARGET_CC: musl-gcc
+          # O gcc do Ubuntu no arm64 chama os atômicos da libgcc ("outline
+          # atomics"), que não linkam com o musl: o configure do jemalloc não
+          # acha atômico nenhum e o build para. Em linha (LL/SC do ARMv8.0),
+          # rodam em qualquer aarch64. Só este alvo lê esta variável.
+          CFLAGS_aarch64_unknown_linux_musl: -mno-outline-atomics
         run: cargo build --release --locked --target "$TARGET"
       - name: pacote
         run: |
@@ -125,8 +130,9 @@ jobs:
           trap 'cat "$log"' EXIT
           "$bin" > "$log" 2>&1 &
           pid=$!
+          # Pronto = PING respondido: o arquivo do socket nasce antes do listen.
           for _ in $(seq 50); do
-            [ -S "$SEMCACHE_IPC_SOCKET_PATH" ] && break
+            "$bin" --ping 2> /dev/null && break
             sleep 0.2
           done
           "$bin" --ping
