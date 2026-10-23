@@ -70,11 +70,13 @@ jobs:
           "$bin/cargo-audit" --version
       # Exceção vencida deixa de valer: reprova até alguém rever o achado e
       # mudar a data, ou tirar a exceção. Vale até o dia da data, inclusive.
+      # Só awk (sem grep): deny.toml sem exceção nenhuma não é falha.
       - name: exceções no prazo
         run: |
           today=$(date -u +%F)
-          expired=$(grep -nE 'revisar em [0-9]{4}-[0-9]{2}-[0-9]{2}' deny.toml \
-            | awk -v today="$today" 'match($0, /revisar em [0-9-]+/) && substr($0, RSTART + 11, 10) < today')
+          expired=$(awk -v today="$today" '
+            match($0, /revisar em [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) &&
+              substr($0, RSTART + 11, 10) < today { print FNR ": " $0 }' deny.toml)
           if [ -n "$expired" ]; then
             echo "::error file=deny.toml::exceção vencida (hoje: $today)"
             echo "$expired"
