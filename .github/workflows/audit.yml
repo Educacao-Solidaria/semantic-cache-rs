@@ -45,6 +45,8 @@ jobs:
         crates/semantic-cache-simd
         crates/semantic-cache-tokenizer
         crates/semantic-cache-ipc
+    # Os gatilhos e as linhas que reprovam estão fixados no tests/audit.rs do
+    # servidor: mudou um deles (ou um `if:`), reveja o teste junto.
     steps:
       - uses: actions/checkout@v4
         with:

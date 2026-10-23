@@ -3,8 +3,9 @@
 //! retirada, licença fora da lista e origem fora do crates.io, nenhuma regra
 //! desligada inteira, e exceção só no `deny.toml`, uma por achado, com motivo
 //! e data de revisão. O workflow (`.github/workflows/audit.yml`) passa por todo
-//! Cargo.lock do repositório. Os achados mesmo (o banco de avisos muda todo
-//! dia) e o prazo das exceções só o workflow vê.
+//! Cargo.lock do repositório, e as linhas dele que reprovam estão fixadas aqui.
+//! Os achados mesmo (o banco de avisos muda todo dia) e o prazo das exceções
+//! só o workflow vê.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -58,6 +59,49 @@ const PERMISSIVE: [&str; 13] = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+];
+/// As linhas do workflow que reprovam, cada bloco em linhas seguidas e uma vez
+/// só: tirar um gatilho ou uma checagem, engolir a saída, mudar o grafo ou o
+/// prazo, ou ignorar aviso fora do deny.toml entra revisto aqui.
+const GATES: [&[&str]; 4] = [
+    &[
+        "on:",
+        "push:",
+        "branches: [main]",
+        "pull_request:",
+        "schedule:",
+        "- cron: '41 9 * * *'",
+        "workflow_dispatch:",
+    ],
+    &[
+        "today=$(date -u +%F)",
+        r#"expired=$(awk -v today="$today" '"#,
+        "match($0, /revisar em [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/) &&",
+        r#"substr($0, RSTART + 11, 10) < today { print FNR ": " $0 }' deny.toml)"#,
+        r#"if [ -n "$expired" ]; then"#,
+        r#"echo "::error file=deny.toml::exceção vencida (hoje: $today)""#,
+        r#"echo "$expired""#,
+        "exit 1",
+    ],
+    &[
+        "for w in $WORKSPACES; do",
+        r#"echo "== $w""#,
+        r#"cargo-deny --manifest-path "$w/Cargo.toml" --config deny.toml --locked \"#,
+        "check advisories licenses sources || status=1",
+        "done",
+        r#"exit "$status""#,
+    ],
+    &[
+        "mapfile -t ignore < <(python3 -c 'import tomllib",
+        r#"for e in tomllib.load(open("deny.toml", "rb"))["advisories"]["ignore"]:"#,
+        r#"print("--ignore=" + e["id"])')"#,
+        "status=0",
+        "for w in $WORKSPACES; do",
+        r#"echo "== $w""#,
+        r#"cargo-audit audit --file "$w/Cargo.lock" "${ignore[@]}" || status=1"#,
+        "done",
+        r#"exit "$status""#,
+    ],
 ];
 
 fn deny() -> Table {
@@ -166,6 +210,10 @@ fn every_exception_has_a_reason_and_a_review_date() {
             review_date(reason),
             "{id}: o motivo sem \"revisar em AAAA-MM-DD\""
         );
+        // O passo do prazo lê o arquivo cru, linha a linha: o motivo fica
+        // inteiro numa linha, sem escape nem quebra.
+        let raw = DENY.lines().any(|l| l.contains(reason));
+        assert!(raw, "{id}: motivo fora de uma linha do deny.toml");
     }
     // Licença não tem `reason` no cargo-deny: o motivo e a data vão no
     // comentário logo acima do `[[licenses.*]]`, a única forma aceita.
@@ -197,6 +245,23 @@ fn the_review_date_is_a_whole_date_on_one_line() {
     ] {
         assert!(!review_date(wrong), "{wrong:?}");
     }
+}
+
+#[test]
+fn the_workflow_gates_are_the_reviewed_ones() {
+    let lines: Vec<&str> = WORKFLOW.lines().map(str::trim).collect();
+    for gate in GATES {
+        let found = lines.windows(gate.len()).filter(|&w| w == gate).count();
+        assert_eq!(found, 1, "{gate:#?}");
+    }
+    // Nenhum passo pulado nem com a falha engolida: os únicos `if` são os de
+    // "um passo reprovado não esconde o outro".
+    let ifs = lines.iter().filter(|l| l.starts_with("if:"));
+    assert_eq!(ifs.collect::<Vec<_>>(), [&"if: ${{ !cancelled() }}"; 2]);
+    assert!(!WORKFLOW.contains("continue-on-error"));
+    // Um `env:` de passo com outra lista trocaria os workspaces auditados.
+    let defined = lines.iter().filter(|l| l.starts_with("WORKSPACES:"));
+    assert_eq!(defined.count(), 1);
 }
 
 #[test]
