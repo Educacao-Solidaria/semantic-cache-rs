@@ -42,9 +42,22 @@ const SECTIONS: [(&str, &[&str]); 4] = [
     ),
     ("sources", &["unknown-git", "unknown-registry"]),
 ];
-/// Famílias de licença com copyleft: só como exceção de um crate.
-const COPYLEFT: [&str; 8] = [
-    "GPL", "MPL", "EPL", "EUPL", "CDDL", "OSL", "SSPL", "CC-BY-SA",
+/// As licenças permissivas que a lista global pode ter. Outra (copyleft, como
+/// GPL e MPL, ou que não seja de código aberto) só como exceção de um crate.
+const PERMISSIVE: [&str; 13] = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
 ];
 
 fn deny() -> Table {
@@ -129,12 +142,8 @@ fn only_permissive_licenses_are_allowed_for_every_crate() {
         .as_array()
         .expect("licenses.allow");
     for license in allow.iter().map(|l| l.as_str().expect("licença em texto")) {
-        let custom = license.starts_with("LicenseRef-");
-        let copyleft = COPYLEFT.iter().any(|family| license.contains(family));
-        assert!(
-            !custom && !copyleft,
-            "{license}: só como exceção de um crate"
-        );
+        let permissive = PERMISSIVE.contains(&license);
+        assert!(permissive, "{license}: só como exceção de um crate");
     }
 }
 
@@ -145,7 +154,7 @@ fn every_exception_has_a_reason_and_a_review_date() {
     for entry in ignore {
         let entry = entry.as_table().expect("exceção em tabela, com motivo");
         let keys: Vec<&str> = entry.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["id", "reason"], "{entry}");
+        assert_eq!(keys, ["id", "reason"], "{entry}: outra forma entra revista");
         let id = entry["id"].as_str().expect("id");
         let number = id.strip_prefix("RUSTSEC-").and_then(|n| n.split_once('-'));
         assert!(
