@@ -144,7 +144,7 @@ jobs:
           kill -TERM "$pid"
           wait "$pid"
           test ! -e "$SEMCACHE_IPC_SOCKET_PATH"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz
@@ -165,7 +165,7 @@ jobs:
         run: |
           sha256sum -- *.tar.gz | tee SHA256SUMS
           ls -l
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release
           path: dist

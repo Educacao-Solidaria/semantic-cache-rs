@@ -52,7 +52,7 @@ jobs:
         if: always()
         run: |
           sed -n 's/^soak: //p' "$RUNNER_TEMP/soak.log" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           # Por tentativa: re-rodar o job com o mesmo nome dá 409 no upload v4.
