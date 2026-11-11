@@ -26,7 +26,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -43,7 +43,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -68,7 +68,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -94,7 +94,7 @@ jobs:
       run:
         working-directory: crates/semantic-cache-testkit
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -112,7 +112,7 @@ jobs:
       run:
         working-directory: crates/semantic-cache-simd
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -133,7 +133,7 @@ jobs:
       run:
         working-directory: crates/semantic-cache-simd
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -150,7 +150,7 @@ jobs:
     # Os testes têm prazo de 10 s; isto só corta um travamento do runner.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -176,7 +176,7 @@ jobs:
       run:
         working-directory: crates/semantic-cache-server
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -202,8 +202,8 @@ jobs:
       # quando este sha mudar.
       GATEWAY_SHA: 9e51bc213b077002240744a9ca52f81477bc7d22
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: Educacao-Solidaria/flow-gateway-go
           ref: ${{ env.GATEWAY_SHA }}
@@ -247,7 +247,7 @@ jobs:
       PROMETHEUS_VERSION: 3.5.0
       PROMETHEUS_SHA256: e811827af26d822afb09a4f28314f61b618b12cff5369835a67f674d8b46f39a
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: promtool
         run: |
           base="https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}"
